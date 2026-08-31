@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ooxml-ledger": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--project", "${CLAUDE_PROJECT_DIR}", "ooxml-ledger-mcp"],
+      "env": {
+        "OOXML_LEDGER_ROOTS": "${CLAUDE_PROJECT_DIR}"
+      }
+    }
+  }
+}

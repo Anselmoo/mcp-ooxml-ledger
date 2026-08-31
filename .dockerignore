@@ -1,0 +1,40 @@
+# Keep the Docker build context small and free of anything the image install step
+# (`pip install .` from pyproject.toml + src/) doesn't need. Mirrors .gitignore
+# where relevant, plus Docker-specific exclusions (mcpb/'s vendored tree, tests
+# fixtures bulk) that .gitignore has no reason to carry.
+
+.git/
+.github/
+
+# Python environments and caches -- never needed inside the image; pip resolves
+# its own build env.
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build/dist artifacts -- rebuilt fresh by `pip install .`, not copied in.
+dist/
+build/
+
+# The vendored .mcpb bundle tree: ~57 MB of platform-specific wheels for the
+# Claude Desktop bundle, irrelevant to (and far larger than) the Docker image.
+mcpb/server/lib/
+
+# Test fixtures are real (small) Office documents but add up, and tests never run
+# inside the image.
+tests/
+
+# Editor/OS cruft and project-local scaffolding not needed for the build.
+.DS_Store
+.claude/
+.superpowers/
+docs/
+mockup/
+*.log

@@ -1,0 +1,9 @@
+[meta]
+generated_at = "2026-08-30T21:36:12+00:00"
+rrt_version = "1.15.0"
+
+[sources.".claude/settings.json"]
+hash = "sha256:84ae2082a9eb0a63e80af83dcebda420b443029aae439e537345f10ab056f6d8"
+symbols = []
+lang = "text"
+updated_at = "2026-08-30T21:36:12+00:00"

@@ -1,0 +1,23 @@
+[meta]
+generated_at = "2026-08-30T14:09:45+00:00"
+rrt_version = "1.15.0"
+
+[checks.pre_commit]
+status = "ok"
+message = ".pre-commit-config.yaml includes repo-release-tools hooks"
+updated_at = "2026-08-30T14:09:45+00:00"
+
+[checks.lefthook]
+status = "obsolete"
+message = "lefthook.yml not configured (obsolete: pre_commit already configured)"
+updated_at = "2026-08-30T14:09:45+00:00"
+
+[checks.husky]
+status = "obsolete"
+message = ".husky not configured (obsolete: pre_commit already configured)"
+updated_at = "2026-08-30T14:09:45+00:00"
+
+[checks.workflows]
+status = "ok"
+message = ".github/workflows includes repo-release-tools policy checks (cicd.yml)"
+updated_at = "2026-08-30T14:09:45+00:00"

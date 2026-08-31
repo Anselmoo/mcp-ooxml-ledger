@@ -1,0 +1,126 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "ooxml-ledger",
+  "display_name": "OOXML Ledger",
+  "version": "0.2.0",
+  "description": "Edit Office documents and prove no edit went unrecorded",
+  "long_description": "Edits .docx, .pptx, and .xlsx files and enforces an accountability gate: `commit_document` refuses to seal a receipt if the document changed in a way no recorded operation explains, unless a human explicitly forces and thereby records the override. `verify` and `digest` are stateless, so the same check that guards an interactive edit also runs in CI. Fourteen tools cover the full loop: open a document, inspect its structure and paragraph text, preview and apply text/paragraph edits, commit with a sealed receipt, and independently verify or export that receipt later. Every path argument is resolved inside the configured document root and refused outside it.",
+  "author": {
+    "name": "Anselm Hahn",
+    "email": "anselm.hahn@gmail.com",
+    "url": "https://github.com/Anselmoo"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Anselmoo/mcp-ooxml-ledger"
+  },
+  "homepage": "https://github.com/Anselmoo/mcp-ooxml-ledger",
+  "license": "MIT",
+  "keywords": [
+    "ooxml",
+    "docx",
+    "pptx",
+    "xlsx",
+    "office",
+    "audit",
+    "ledger",
+    "mcp"
+  ],
+  "server": {
+    "type": "python",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "python",
+      "args": [
+        "${__dirname}/server/main.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname}/server/lib",
+        "OOXML_LEDGER_ROOTS": "${user_config.documentRoot}",
+        "OOXML_LEDGER_READ_ONLY": "${user_config.readOnly}"
+      }
+    }
+  },
+  "user_config": {
+    "documentRoot": {
+      "type": "directory",
+      "title": "Document root",
+      "description": "Folder the server may read and write inside. Every path argument the server receives is resolved inside this folder and refused outside it \u2014 a drag-and-drop install has no working directory to fall back on, so this must be set explicitly. Pick the folder that holds (or will hold) the Office documents you want edited.",
+      "required": true
+    },
+    "readOnly": {
+      "type": "boolean",
+      "title": "Read-only mode",
+      "description": "When enabled, only server_info, digest, verify, and list_receipts are available \u2014 no session, edit, or write tools are registered at all (not merely hidden). Use this for CI or for reviewing documents without any write surface.",
+      "default": false,
+      "required": false
+    }
+  },
+  "tools": [
+    {
+      "name": "server_info",
+      "description": "Report tool, canon, and receipt-schema versions, the active roots, and whether the server is read-only."
+    },
+    {
+      "name": "open_document",
+      "description": "Open a .docx/.pptx/.xlsx file inside the configured root and start an editing session."
+    },
+    {
+      "name": "close_document",
+      "description": "End a session, optionally discarding any unsaved changes."
+    },
+    {
+      "name": "describe_structure",
+      "description": "Report the paragraph/part structure of the document open in a session."
+    },
+    {
+      "name": "find_text",
+      "description": "Search paragraph text in the open document and return addressable paragraph IDs and hashes."
+    },
+    {
+      "name": "preview_edits",
+      "description": "Report what a batch of text edits would do, without touching the document."
+    },
+    {
+      "name": "apply_edits",
+      "description": "Apply a batch of text edits all-or-nothing and journal the operation."
+    },
+    {
+      "name": "delete_paragraph",
+      "description": "Delete one paragraph addressed by its ID (or index + hash) and journal the operation."
+    },
+    {
+      "name": "insert_paragraph",
+      "description": "Insert one paragraph beside an anchor paragraph (addressed by ID + hash) and journal the operation."
+    },
+    {
+      "name": "commit_document",
+      "description": "Seal a receipt for the session's changes; refuses if the document changed in a way no recorded operation explains, unless forced."
+    },
+    {
+      "name": "list_receipts",
+      "description": "List the sealed receipts recorded for a document."
+    },
+    {
+      "name": "export_receipt",
+      "description": "Write a receipt out to a .json file inside the configured root."
+    },
+    {
+      "name": "digest",
+      "description": "Compute the canonical digest of a document. Stateless \u2014 needs no open session."
+    },
+    {
+      "name": "verify",
+      "description": "Independently verify a document against a receipt, including any recorded force-override. Stateless."
+    }
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin"
+    ],
+    "runtimes": {
+      "python": ">=3.13"
+    }
+  }
+}

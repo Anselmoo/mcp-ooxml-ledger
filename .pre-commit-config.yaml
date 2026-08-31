@@ -1,0 +1,55 @@
+# Run:  pre-commit install --install-hooks -t pre-commit -t commit-msg
+#
+# Ordering note: pyupgrade rewrites syntax, so it runs BEFORE ruff-format —
+# otherwise the formatter runs on code pyupgrade is about to change and the
+# second hook reformats it again, producing a two-pass commit.
+
+default_language_version:
+  python: python3.13
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        # The corpus fixtures are real Office documents (7-40 kB) and must be
+        # committed verbatim -- they are the measured evidence the specs cite.
+        args: [--maxkb=512]
+      - id: end-of-file-fixer
+        exclude: ^tests/fixtures/
+      - id: trailing-whitespace
+        exclude: ^tests/fixtures/
+      - id: mixed-line-ending
+        # .gitignore carries a literal CR inside two macOS globs (`Icon[<CR>]`).
+        # That CR is CONTENT, not a stray line ending: without it the pattern
+        # matches a file named `Icon[` instead of the real `Icon\r` resource file.
+        exclude: ^(tests/fixtures/|\.gitignore$)
+
+  - repo: https://github.com/asottile/pyupgrade
+    rev: v3.21.2
+    hooks:
+      - id: pyupgrade
+        args: [--py313-plus]
+        # mockup/ is frozen prototype code kept as evidence; never rewrite it.
+        exclude: ^mockup/
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.4
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/astral-sh/ty-pre-commit
+    rev: v0.0.75
+    hooks:
+      - id: ty
+
+  - repo: https://github.com/Anselmoo/repo-release-tools
+    rev: v1.15.0
+    hooks:
+      - id: rrt-branch-name
+      - id: rrt-commit-subject

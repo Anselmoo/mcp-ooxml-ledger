@@ -1,0 +1,89 @@
+[project]
+name = "mcp-ooxml-ledger"
+version = "0.2.0"
+description = "Edit Office documents and prove no edit went unrecorded"
+requires-python = ">=3.13"
+# PyPI-facing metadata: absent, a first release would ship a project page with no rendered
+# README, no license, and no links back to the repo -- the first things a user checks.
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Anselm Hahn", email = "anselm.hahn@gmail.com" }]
+keywords = ["mcp", "ooxml", "docx", "pptx", "xlsx", "provenance", "audit"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Topic :: Office/Business :: Office Suites",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Text Processing :: Markup :: XML",
+    "Typing :: Typed",
+]
+dependencies = [
+    # FastMCP v4 requires pydantic >= 2.12 and fails to install below it.
+    "pydantic>=2.12",
+    "typer>=0.12",
+    "rfc8785>=0.1.4",
+    # CORE, NOT AN EXTRA: this project IS an MCP server; a prior revision hid it behind an
+    # optional `mcp` extra, trading the product being built for install convenience.
+    # EXACT pin, deliberately: `fastmcp>=4` is unsatisfiable (only 4.0.0a1/a2/b1/b2/b3 exist
+    # on PyPI; uv won't select a pre-release for an unqualified range). Beta was chosen
+    # knowingly over v3-on-maintenance and the official SDK's MCPServer. A range would let a
+    # beta-to-beta break arrive via lockfile refresh. DO NOT relax to >=4 or >=4.0.0b3.
+    "fastmcp==4.0.0b3",
+]
+
+[project.urls]
+Homepage = "https://github.com/Anselmoo/mcp-ooxml-ledger"
+Repository = "https://github.com/Anselmoo/mcp-ooxml-ledger"
+Issues = "https://github.com/Anselmoo/mcp-ooxml-ledger/issues"
+Changelog = "https://github.com/Anselmoo/mcp-ooxml-ledger/blob/main/CHANGELOG.md"
+
+[project.scripts]
+ooxml-ledger = "ooxml_ledger.cli:main"
+ooxml-ledger-mcp = "ooxml_ledger.mcp.server:main"
+
+[build-system]
+requires = ["uv_build>=0.12.6,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "ooxml_ledger"
+
+[dependency-groups]
+dev = [
+    # tests/test_packaging.py imports packaging.version; it resolves today only via a
+    # transitive pull. Declared explicitly since the test's own group should own it.
+    "packaging>=24",
+    # CI runs `pre-commit run --all-files`, keeping .pre-commit-config.yaml the single
+    # source of lint truth. Declared here (not via uvx) so uv.lock pins CI's version.
+    "pre-commit>=4.6.0",
+    "pytest>=8",
+    "pytest-cov>=7",
+    # ruff's exact pin must stay in lockstep with astral-sh/ruff-pre-commit's rev in
+    # .pre-commit-config.yaml -- a real cross-file constraint. pytest-cov and pre-commit
+    # have no such constraint, so they follow pytest's loose floor instead.
+    "ruff==0.16.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src/ooxml_ledger"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+# NO fail_under: a threshold picked before a baseline was measured asserts a check
+# nobody ran -- the exact defect this project exists to catch. Measure first
+# (`uv run pytest --cov=src/ooxml_ledger`), then set a floor at/below that value.
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
