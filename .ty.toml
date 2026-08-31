@@ -1,0 +1,23 @@
+# NOT read by ty. Kept in sync with `ty.toml` (the file ty actually auto-discovers) purely
+# because this repo asked for a `.ty.toml` file and one shouldn't sit here looking
+# authoritative while doing nothing.
+#
+# Verified empirically (2026-08-27): ty's auto-discovery recognizes the bare filename
+# `ty.toml` at the project root (also `pyproject.toml`'s [tool.ty]) but never the dotted
+# `.ty.toml` -- confirmed by removing `ty.toml` and watching `ty check .` and the pinned
+# pre-commit hook (`uv check --ty-version=0.0.69`) both walk into mockup/ despite this
+# file's `exclude`, then pass clean once a same-content `ty.toml` existed alongside it.
+# `--config-file .ty.toml` does load this file -- so it isn't inert everywhere, just under
+# every invocation this repo's tooling actually uses, none of which pass that override.
+#
+# If you edit ty's config, edit `ty.toml` and copy the result here (or vice versa) -- this
+# file is not a symlink because standalone TOML files can't include one another, and a
+# stale copy that silently stops matching `ty.toml` is exactly the drift this project
+# exists to catch.
+
+[environment]
+python-version = "3.13"
+
+[src]
+include = ["src"]
+exclude = ["mockup"]

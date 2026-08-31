@@ -1,0 +1,46 @@
+# This is the file ty actually reads. See `.ty.toml` at the repo root for why both exist --
+# short version: ty's auto-discovery only recognizes the bare filename `ty.toml`, never the
+# dotted `.ty.toml`, and there is no way to make the pinned pre-commit `ty` hook (which
+# calls `uv check` with no `--config-file` override) pass one explicitly. Keep the two
+# files identical; `.ty.toml` carries the full rationale.
+#
+# Standalone config file: OVERRIDES [tool.ty] in pyproject.toml, does not merge with it.
+# Migrated from pyproject.toml (2026-08-27); [tool.ty.src] there is no longer authoritative.
+#
+# ty is young (0.0.x) and its docs are explicit that defaults may change; this file stays
+# conservative on purpose -- only what the project needs pinned (Python version, src
+# layout), no rule-level overrides, because the default rule set already passes clean.
+#
+# The pinned pre-commit `ty` hook (astral-sh/ty-pre-commit v0.0.75, wrapping
+# `uv check --ty-version=0.0.69` -- verified by reading its own .pre-commit-hooks.yaml)
+# type-checks the WHOLE project every commit, no per-file scoping. Whatever is in scope
+# here gates every future commit, not just this one.
+
+[environment]
+# Matches [project].requires-python in pyproject.toml (>=3.13) and ruff's target-version.
+python-version = "3.13"
+
+[src]
+# `include` only affects ty's no-argument root auto-detection (confirmed empirically: with
+# no `src` config at all, bare `ty check` already resolves to `src/` on its own, since
+# `src/` exists with no `__init__.py`). It has no effect on `uv check` (the hook ty
+# actually runs) or `ty check .`, both of which pass an explicit path that overrides
+# `include` outright. Kept anyway for clarity when running `ty check` directly -- it costs
+# nothing.
+include = ["src"]
+
+# mockup/ is the frozen prototype the specs cite as source material: kept verbatim as
+# evidence, never imported, not part of the distribution -- and not real, importable
+# ooxml_ledger code (its imports resolve to a package that doesn't exist here), so
+# type-checking it is meaningless.
+#
+# Unlike `include`, `exclude` DOES apply regardless of how ty is invoked -- verified
+# empirically (2026-08-27) against `ty check .` and the pinned hook command
+# (`uv check --ty-version=0.0.69`): both walked into mockup/ and failed on its
+# intentionally-broken imports before this line was added, and pass clean with it.
+#
+# Ruff and ty both expose a CLI-only `--force-exclude` for a caller naming an excluded path
+# directly (e.g. `ty check mockup/cli.py`); NOT a valid `[src]` config key in this ty
+# version (0.0.69/0.0.75 both reject it via `--config-file`), and unneeded here since
+# nothing explicitly names mockup/ -- it's only ever swept up under "check everything".
+exclude = ["mockup"]

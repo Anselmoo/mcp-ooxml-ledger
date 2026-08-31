@@ -1,0 +1,8 @@
+# Per-phase execution scaffolding stays out of git.
+*
+# ...except this file, and the fastmcp reference that
+# docs/superpowers/plans/2026-08-27-mcp-server.md cites three times and tells its
+# reader to read before starting. A committed plan must not point at a file that
+# is not in the repository.
+!.gitignore
+!fastmcp-v4-reference.md

@@ -1,0 +1,68 @@
+# mockup/ is the frozen prototype the specs cite as source material: kept verbatim as
+# evidence, never imported, not part of the distribution.
+#
+# *.md: Ruff 0.16 formats fenced Python code blocks inside Markdown by default (new this
+# release; see the "Rule selection" note below re: 0.16's other default-behaviour changes).
+# This repo's markdown carries illustrative snippets, not code Ruff should own, and
+# docs/superpowers/**/*.md is under active concurrent edit, so implicit rewriting on every
+# commit is not something to opt into.
+extend-exclude = ["mockup", "*.md"]
+
+# Standalone config file: OVERRIDES [tool.ruff] in pyproject.toml, does not merge with it.
+# Migrated from pyproject.toml (2026-08-27); nothing there is authoritative for ruff now.
+target-version = "py313"
+line-length = 88
+
+[lint]
+# Ruff 0.16 (pinned via .pre-commit-config.yaml -> astral-sh/ruff-pre-commit v0.16.4)
+# enables ~413 rules by default, not the historical E4/E7/E9/F set this repo was built
+# against -- a breaking change in Ruff's own default-rules policy shipped 2026-07-23. Left
+# unspecified, `select` rides that default and would silently re-scope on the next
+# pre-commit rev bump; riding an upstream default that already grew 59 -> 413 once is
+# exactly the drift this project exists to catch. So `select` stays implicit (still ruff's
+# default, already broad, and clean here) while every category below is an explicit,
+# deliberate opt-in, reviewed the same way any other config change is.
+#
+# Each was verified clean (`ruff check .`) at FULL category strength, beyond whatever
+# partial subset ruff's default already enables for it:
+#   B    (flake8-bugbear)        — default "extensive but not complete"; full set clean.
+#   C4   (flake8-comprehensions) — default "most rules"; full set clean.
+#   FIX  (flake8-fixme)          — flags any left-behind FIXME/TODO/XXX/HACK; full set
+#                                   clean -- this codebase carries zero deferral comments,
+#                                   all of it lives in docs/superpowers/ instead.
+#   I    (isort)                 — default I001 only; full import-sort ordering clean, and
+#                                   this project's layout (ledger/, xml/, canon/) benefits
+#                                   from consistent grouping.
+#   PERF (Perflint)              — default partial; full set clean.
+#   PTH  (flake8-use-pathlib)    — default PTH124/PTH210 only; full set clean except one
+#                                   deliberate `os.replace()` in ledger/store.py, carved out
+#                                   below rather than dropping the category over one line.
+#   S    (flake8-bandit)         — default S102/S110/S112 only; a security-conscious tool
+#                                   should run the full set. src/ is clean; tests/ hits only
+#                                   S101 (`assert`), normal pytest style, carved out below.
+#   SIM  (flake8-simplify)       — default partial; full set clean.
+#   TD   (flake8-todos)          — full set clean. Opted in forward-looking, not to fix
+#                                   anything: TD002/TD003 make an author and a link
+#                                   MANDATORY on any future marker, so a deferral can't be
+#                                   provenance-free -- this project's own invariant applied
+#                                   to its comments.
+#   UP   (pyupgrade)             — default already "comprehensive"; kept explicit as a
+#                                   second net alongside the separate `pyupgrade` pre-commit
+#                                   hook (auto-fix only, runs before ruff -- see
+#                                   .pre-commit-config.yaml's ordering note), and flags
+#                                   anything that hook's fixer set doesn't cover.
+extend-select = ["B", "C4", "FIX", "I", "PERF", "PTH", "S", "SIM", "TD", "UP"]
+
+[lint.per-file-ignores]
+# assert is the normal pytest idiom, not a production security concern.
+"tests/**" = ["S101"]
+# Launching a subprocess IS this script's purpose: it starts the bundled MCP server the
+# same way a host does. argv is [sys.executable, <path inside a TemporaryDirectory we just
+# unpacked>] -- no shell, no element from untrusted input -- so the check S603 exists to
+# enforce is satisfied by construction, not waived.
+"scripts/smoke_mcpb.py" = ["S603"]
+# _atomic_write's docstring documents *why* this is os.replace(), not Path.replace(): the
+# exact atomicity contract (same-filesystem, single-syscall replace) it depends on.
+# Rewriting it would desync the code from the prose that explains it -- out of this
+# config-only change's scope.
+"src/ooxml_ledger/ledger/store.py" = ["PTH105"]

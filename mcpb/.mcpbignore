@@ -1,0 +1,7 @@
+# mcpb pack always excludes .git, .DS_Store, *.mcpb and a handful of JS-tooling files
+# (see @anthropic-ai/mcpb's built-in EXCLUDE_PATTERNS) but knows nothing about Python
+# bytecode caches, which `build.sh`'s vendoring step leaves behind under server/lib.
+__pycache__/
+*.pyc
+*.pyo
+*.dist-info/RECORD

@@ -1,0 +1,629 @@
+# The trusted-publisher registrations on pypi.org and test.pypi.org bind to this file's
+# NAME. Renaming this file breaks every publish with a 403 until both registrations are
+# updated by hand.
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Superseding a PR push is free; cancelling a tag build mid-publish is not.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.13"
+  # Pinned to the same release as the Anselmoo/repo-release-tools rev in
+  # .pre-commit-config.yaml. rrt is NOT a project dependency -- it is a standalone tool
+  # invoked through uvx -- so CI and the hooks agree on one version by pin, not by luck.
+  RRT_VERSION: "1.15.0"
+  # Pinned to a specific published release of modelcontextprotocol/registry so the
+  # mcp-registry-publish job never silently picks up a new CLI mid-flight. Bump
+  # deliberately -- check https://github.com/modelcontextprotocol/registry/releases
+  # first -- and re-verify the linux/amd64 asset name hasn't changed.
+  MCP_PUBLISHER_VERSION: "v1.8.1"
+
+jobs:
+  verify:
+    name: Release-policy snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "${{ env.PYTHON_VERSION }}"
+      # Compares the live health checks against the committed .rrt/health.lock.toml and
+      # fails on any regression -- the check that turns "we fixed the workflows warning"
+      # into "the warning cannot come back unnoticed".
+      - name: rrt doctor (strict, against the committed snapshot)
+        run: uvx repo-release-tools==${{ env.RRT_VERSION }} doctor --check --strict
+      # Validates every [[tool.rrt.version_targets]] entry and warns on pin drift.
+      - name: rrt release check (version and pin targets)
+        run: uvx repo-release-tools==${{ env.RRT_VERSION }} release check
+      # The MCP registry authorises an OIDC publish by PREFIX-MATCHING server.json's name
+      # against the namespace the token grants, with NO case folding. github.repository_owner
+      # carries GitHub's canonical casing, so this compares the two authorities directly.
+      #
+      # MEASURED 2026-08-30 on a sibling repo (Anselmoo/mcp-zen-of-languages, run
+      # 33332718848): server.json said `io.github.anselmoo/...` while the token granted
+      # `io.github.Anselmoo/*`, and the registry answered
+      #   403 "You do not have permission to publish this server."
+      # This runs in `verify` -- the FIRST job -- and not in the publish job, because
+      # mcp-registry-publish needs publish-pypi: by the time a 403 lands there, the wheel
+      # is already irreversibly on PyPI. A casing typo must fail before anything ships,
+      # not after.
+      - name: server.json namespace must match the owner's exact casing
+        run: |
+          set -euo pipefail
+          declared="$(python3 -c "import json;print(json.load(open('server.json'))['name'])")"
+          expected_prefix="io.github.${{ github.repository_owner }}/"
+          case "$declared" in
+            "$expected_prefix"*) echo "ok: $declared is inside $expected_prefix*" ;;
+            *)
+              echo "::error::server.json name '$declared' is not inside 'io.github.${{ github.repository_owner }}/'. The MCP registry compares these case-sensitively; publishing would fail with 403 after PyPI has already published."
+              exit 1
+              ;;
+          esac
+
+  lint:
+    name: Lint & release policy
+    runs-on: ubuntu-latest
+    needs: [verify]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The repo-release-tools action inspects branch names and commit subjects.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "${{ env.PYTHON_VERSION }}"
+      - run: uv sync --dev
+      # .pre-commit-config.yaml is the single source of lint truth. The previous ci.yml
+      # hand-copied `ruff check` and `ruff format --check` here, which meant ty,
+      # pyupgrade, and all six pre-commit-hooks checks were configured but NEVER ran in
+      # CI. Running the hooks is what actually enforces them.
+      #
+      # SKIP: actions/checkout leaves a detached HEAD on pull_request events, so
+      # rrt-branch-name has no branch to read. Its policy is not dropped -- the
+      # repo-release-tools action step below checks branch names the way CI is meant to,
+      # from the event payload rather than from the checkout. rrt-commit-subject is a
+      # commit-msg-stage hook and would not run under `--all-files` regardless; it is
+      # listed for symmetry so the SKIP set reads as one deliberate decision.
+      - name: pre-commit (all hooks except the two that need a real branch)
+        env:
+          SKIP: rrt-branch-name,rrt-commit-subject
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+      # Closes the `rrt doctor` "workflows" warning: the check is a text scan of
+      # .github/workflows/* for a repo-release-tools marker.
+      #
+      # changelog-strategy "auto" resolves to per-commit here, because .rrt.toml sets no
+      # changelog_workflow and rrt's default is "incremental". Every PR must therefore
+      # touch CHANGELOG.md. That is intended.
+      - name: Validate release policy (rrt)
+        if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/')
+        uses: Anselmoo/repo-release-tools@v1.15.0
+        with:
+          check-branch-name: "true"
+          check-commit-subject: ${{ github.event_name == 'pull_request' }}
+          check-changelog: "true"
+          changelog-strategy: "auto"
+
+  test:
+    name: "Test (Python ${{ matrix.python-version }})"
+    runs-on: ubuntu-latest
+    needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        # requires-python = ">=3.13". Deliberately NOT 3.12, whatever sibling
+        # projects do -- a matrix entry is a support claim.
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "${{ matrix.python-version }}"
+      - run: uv sync --dev
+      - run: uv run pytest -vv --cov=src/ooxml_ledger --cov-report=xml --cov-report=term-missing
+      # CODECOV_TOKEN is required. The earlier assumption that a public repo could
+      # upload tokenless was WRONG -- MEASURED 2026-08-31: codecov-action@v5 needs the
+      # token even for a public repository, and `slug` must be passed explicitly
+      # alongside it.
+      #
+      # This is the ONE human-created secret in this repository, and it is scoped to
+      # coverage reporting: it cannot publish a package, push an image, or write to
+      # this repo. The RELEASE path takes no secret at all and must stay that way --
+      # publish-pypi and mcp-registry-publish below authenticate by OIDC only. The
+      # PreToolUse guard under .claude/hooks/ allows exactly this token and the
+      # auto-minted GITHUB_TOKEN, and denies every other secrets.* reference here.
+      #
+      # fail_ci_if_error is false so a Codecov outage cannot fail the build; the
+      # coverage-xml artifact below is the independent, always-available fallback.
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.13'
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: Anselmoo/mcp-ooxml-ledger
+          files: coverage.xml
+          fail_ci_if_error: false
+      - name: Upload coverage
+        if: matrix.python-version == '3.13'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: error
+
+  docker-build-check:
+    name: "Docker image build (sanity, no push)"
+    runs-on: ubuntu-latest
+    needs: [test]
+    # PRs and main pushes, NOT tags -- the point is to fail a broken Dockerfile
+    # before a tag reaches docker-publish, not to duplicate that job. Mirrors how
+    # docker-publish itself is gated below, just on the complementary condition.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Build image (no push)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: mcp-ooxml-ledger:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # A build that succeeds can still ship a broken ENTRYPOINT (typo, wrong
+      # working dir, missing console-script). Pipe one JSON-RPC `initialize`
+      # request in and require a `"result"` back -- the same handshake
+      # scripts/smoke_mcpb.py proves for the .mcpb bundle. `timeout` bounds the
+      # run because a stdio server that never answers would otherwise hang the
+      # job instead of failing it; `|| true` on the substitution absorbs the
+      # timeout's own nonzero exit so the real check is the grep below.
+      - name: Smoke-test the stdio handshake
+        run: |
+          set -euo pipefail
+          request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"1"}}}'
+          response="$(printf '%s\n' "$request" | timeout 30 docker run --rm -i mcp-ooxml-ledger:ci || true)"
+          echo "$response"
+          printf '%s' "$response" | grep -q '"result"'
+
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "${{ env.PYTHON_VERSION }}"
+      - run: uv build
+      # These two guards live in `build`, not in the publish jobs, because everything
+      # downstream consumes this job's artifact: a mismatch caught here cannot reach
+      # PyPI, and PyPI does not allow re-uploading a version.
+      - name: Tag must match the built distribution version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          wheel="$(ls dist/*.whl)"
+          # mcp_ooxml_ledger-<version>-py3-none-any.whl -- the distribution name is
+          # already normalised to underscores, so field 2 is the version.
+          built="$(basename "$wheel" | cut -d- -f2)"
+          if [ "$tag" != "$built" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} declares version '${tag}' but uv build produced '${built}'"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches built version ${built}"
+      - name: Changelog must carry a section for this tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          uvx repo-release-tools==${{ env.RRT_VERSION }} release notes \
+            --version "${GITHUB_REF_NAME}" --format md > /dev/null
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v7
+      - name: SBOM for the source tree
+        uses: anchore/sbom-action@v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom-source.spdx.json
+          artifact-name: sbom-source.spdx.json
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-package-distributions
+          path: dist/
+      - id: wheel
+        run: echo "path=$(ls dist/*.whl | head -1)" >> "$GITHUB_OUTPUT"
+      - name: SBOM for the built wheel
+        uses: anchore/sbom-action@v0.24.0
+        with:
+          file: "${{ steps.wheel.outputs.path }}"
+          format: spdx-json
+          output-file: sbom-wheel.spdx.json
+          artifact-name: sbom-wheel.spdx.json
+
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    # This repo is public, so actions/dependency-review-action runs without needing
+    # GitHub Advanced Security and is expected to run -- and to block -- on every PR.
+    # The private-repo check is kept as defense in depth: harmless while public, and
+    # correct again if the repo ever flips back to private (the action hard-fails
+    # there without Advanced Security). Do NOT add continue-on-error back: that would
+    # make a real vulnerable dependency merge silently instead of failing the PR.
+    if: github.event_name == 'pull_request' && github.event.repository.private == false
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/dependency-review-action@v5
+
+  mcpb:
+    name: Build & smoke-test the .mcpb bundle (macOS)
+    # macos-latest IS THE POINT. mcpb/build.sh vendors with `uv pip install --target`,
+    # which fetches wheels for the platform it runs on, and mcpb/manifest.json claims
+    # compatibility.platforms: ["darwin"] and nothing else. Building this on
+    # ubuntu-latest would ship linux .so files under a darwin claim -- the exact defect
+    # build.sh's own header refuses. Do not "simplify" this to ubuntu.
+    runs-on: macos-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "${{ env.PYTHON_VERSION }}"
+      # build.sh passes `--python 3.13` explicitly; make sure that request resolves.
+      - run: uv python install 3.13
+      - name: Vendor, validate, and pack the bundle
+        run: bash mcpb/build.sh
+      # `npx @anthropic-ai/mcpb validate`, which build.sh already ran, checks the
+      # manifest's SHAPE and never imports a vendored module. This starts the bundled
+      # server and speaks the MCP stdio handshake to it, so a bundle that packs cleanly
+      # but cannot import its native extensions fails here rather than on a user's
+      # machine. --python 3.13 matches what build.sh vendored; the script refuses to run
+      # under a mismatched interpreter rather than blaming the bundle.
+      - name: Smoke-test the bundle
+        run: uv run --no-project --python 3.13 python scripts/smoke_mcpb.py dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mcpb-package
+          path: dist/*.mcpb
+          if-no-files-found: error
+
+  docker-publish:
+    name: "Publish Docker image to GHCR"
+    runs-on: ubuntu-latest
+    # `test` ONLY -- deliberately NOT docker-build-check.
+    #
+    # MEASURED 2026-08-31 on tag v0.2.0 (Actions run 33362809759): this job read
+    # `needs: [docker-build-check, test]`, and docker-build-check is gated on
+    # `pull_request || refs/heads/main`. On a TAG push github.ref is
+    # refs/tags/vX.Y.Z, which matches neither, so that job skipped -- and GitHub
+    # skips a job whose dependency skipped. docker-publish skipped, then
+    # mcp-registry-publish (which needs docker-publish) skipped too. The run
+    # reported SUCCESS while shipping a partial release: PyPI and the GitHub
+    # Release went out, the image and the registry entry did not.
+    #
+    # Never make a release job depend on one that is conditioned OFF for the very
+    # ref that triggers the release. docker-build-check is a PR/main-time sanity
+    # gate; on a tag this job does its own real build, so there is nothing to wait
+    # for.
+    needs: [test]
+    # TAGS ONLY, same reasoning as publish-pypi below: this job pushes one
+    # specific released version to a public registry.
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      # This permission is the whole reason this job exists: pushing to ghcr.io
+      # needs packages: write. GITHUB_TOKEN is auto-minted per job run by GitHub
+      # Actions -- it is not a secret anyone added, and it is the correct
+      # credential here. The repository does hold one human-created secret --
+      # CODECOV_TOKEN, for coverage upload -- but nothing in the RELEASE path uses a
+      # stored credential, and nothing should: this token is minted per run.
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # LOAD-BEARING, and easy to "fix" into breaking server.json below: OCI image
+      # references MUST be all-lowercase or ghcr.io refuses the push. This is a
+      # DIFFERENT rule from server.json's `name` field two jobs down, which must
+      # keep GitHub's exact `Anselmoo` casing (see the `verify` job's namespace
+      # check earlier in this file) -- the MCP registry's OIDC match is
+      # case-sensitive, ghcr's repository path is not case-sensitive-tolerant in
+      # the other direction. Lowercase this one, keep that one exactly as GitHub
+      # spells the owner. Do not "reconcile" the two into matching casing.
+      - name: Derive the lowercase ghcr.io image name
+        id: image
+        run: |
+          echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      # Single platform (linux/amd64, the runner's native arch) deliberately, not
+      # multi-arch. The Dockerfile's `pip install .` fetches platform-specific
+      # wheels (pydantic-core, cryptography, and the rest of fastmcp's native
+      # extension tree); building linux/arm64 under QEMU emulation would need
+      # docker/setup-qemu-action AND verifying those wheels actually resolve
+      # under emulation -- unverified here, so not shipped. Add it deliberately,
+      # with that verification, rather than copying a platforms: list that looks
+      # more complete than it is.
+      - name: Build and push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # NEW ghcr.io PACKAGES DEFAULT TO PRIVATE. There is no reliable REST API to
+      # flip that -- checked docs.github.com/en/rest/packages: the package
+      # resource has a `visibility` field but no documented PATCH/PUT endpoint
+      # sets it; GitHub's own docs point at the web UI
+      # (Packages -> package -> Package settings -> Change visibility) as the
+      # only way. Until a human does that once, mcp-registry-publish below will
+      # fail its OCI package validation with a 400 ("OCI image is private or
+      # requires authentication. Only public images are supported") -- this
+      # exact failure hit a sibling project, Anselmoo/mcp-server-analyzer, on
+      # 2026-08-30. See CONTRIBUTING.md's Releasing section for the manual step.
+      - name: Public-image reminder
+        run: |
+          echo "::notice::If this is the first push of ${{ steps.image.outputs.name }}, the ghcr.io package is PRIVATE by default. A human must make it public (Packages -> package settings -> Change visibility) BEFORE mcp-registry-publish runs, or that job fails with a 400. See CONTRIBUTING.md's Releasing section."
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    runs-on: ubuntu-latest
+    needs: [build, sbom]
+    # main pushes and tags. skip-existing means a repeated main push after a release
+    # is a no-op rather than a failure.
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/mcp-ooxml-ledger/
+    permissions:
+      # OIDC trusted publishing. No stored credential takes part in publishing, and
+      # none ever should -- the repository's single human-created secret,
+      # CODECOV_TOKEN, uploads coverage and cannot publish anything. The identity
+      # used here is minted by GitHub per run and verified by
+      # TestPyPI against a registration naming this repo, this workflow FILENAME
+      # (cicd.yml) and this environment name (testpypi).
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-package-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+          print-hash: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    # mcpb is in `needs` on purpose: a release whose bundle does not start should not
+    # put a wheel on PyPI first. sbom is in `needs` so the release's attestations exist
+    # before the artifact they describe is public.
+    needs: [build, sbom, mcpb]
+    # TAGS ONLY. Widening this condition publishes to the real index on every main push.
+    if: startsWith(github.ref, 'refs/tags/')
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mcp-ooxml-ledger/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-package-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+          print-hash: true
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    # After publish-pypi: the release notes point at a PyPI version, so the version
+    # should exist by the time the notes are public.
+    needs: [build, mcpb, sbom, publish-pypi]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "${{ env.PYTHON_VERSION }}"
+      - id: rel
+        name: Derive version and pre-release flag from the tag
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          # PEP 440 pre-release and dev suffixes: 1.2.0a1, 1.2.0b3, 1.2.0rc1, 1.2.0.dev0.
+          if printf '%s' "$v" | grep -Eq '(a|b|rc|dev)[0-9]*$'; then
+            pre=true
+          else
+            pre=false
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
+          echo "version=$v prerelease=$pre"
+      # No custom release-notes script. `rrt release notes` reads CHANGELOG.md's
+      # versioned section directly and exits non-zero if the tag has no section --
+      # which the build job already checked, so this cannot be the first surprise.
+      # Do NOT use a bare `rrt release notes`: it defaults to [Unreleased], which is
+      # empty after a bump.
+      - name: Render release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          uvx repo-release-tools==${{ env.RRT_VERSION }} release notes \
+            --version "${{ steps.rel.outputs.version }}" \
+            --format gh-release \
+            --output RELEASE_CHANGELOG.md
+      - run: cat RELEASE_CHANGELOG.md
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-package-distributions
+          path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          name: mcpb-package
+          path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          name: sbom-wheel.spdx.json
+          path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          name: sbom-source.spdx.json
+          path: dist/
+      - uses: softprops/action-gh-release@v3
+        with:
+          body_path: RELEASE_CHANGELOG.md
+          draft: false
+          prerelease: ${{ steps.rel.outputs.prerelease }}
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/*.mcpb
+            dist/sbom-*.spdx.json
+          # A release that silently ships three of four expected assets is worse than
+          # one that fails loudly.
+          fail_on_unmatched_files: true
+
+  mcp-registry-publish:
+    name: Publish to the MCP registry
+    runs-on: ubuntu-latest
+    # After publish-pypi, not publish-testpypi: the registry validates ownership by
+    # fetching the package's PyPI-RENDERED description from real pypi.org and
+    # grepping it for the `mcp-name: io.github.Anselmoo/mcp-ooxml-ledger` marker
+    # (added to README.md). TestPyPI is not an accepted source, so this must wait
+    # for the real publish to succeed, not the test one.
+    #
+    # docker-publish is in `needs` too: server.json's oci package entry names an
+    # image that must already exist (and, per that job's reminder, be public) in
+    # ghcr.io before mcp-publisher validates it -- publishing registry metadata
+    # for an image that isn't pushed yet would fail regardless of PyPI state.
+    needs: [publish-pypi, docker-publish]
+    # TAGS ONLY, same reasoning as publish-pypi: this job publishes registry metadata
+    # naming one specific released version. Widening this condition would attempt to
+    # publish registry metadata on every main push.
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      # GitHub OIDC only -- no secret, no token, ever. mcp-publisher exchanges this
+      # job's OIDC token for a registry JWT scoped to io.github.Anselmoo/*.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      # -f is load-bearing, not decoration: without it curl answers a 404 with exit 0
+      # and writes the error page to the output file, so tar fails later with a
+      # confusing "not in gzip format" instead of "that release asset does not exist".
+      # MEASURED 2026-08-30: a deliberately wrong asset name downloaded 9 bytes at
+      # exit 0 without -f, and failed at exit 56 with it.
+      # os/arch are derived rather than hardcoded so this step keeps working if the
+      # runner ever moves off linux/amd64.
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          arch="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+          curl -fsSL \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${{ env.MCP_PUBLISHER_VERSION }}/mcp-publisher_${os}_${arch}.tar.gz" \
+            | tar xz mcp-publisher
+          chmod +x mcp-publisher
+      - name: Authenticate to the MCP registry (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+      # PyPI propagation lag is real: the registry queries pypi.org for the rendered
+      # description the moment `publish` runs, and a wheel uploaded moments ago by
+      # publish-pypi may not be visible there yet. Retry a bounded number of times
+      # rather than failing a whole release on a timing race we don't control.
+      # Deliberately NOT unbounded -- 5 attempts, 30s apart, then give up for real.
+      - name: Publish server.json (bounded retry for PyPI propagation lag)
+        run: |
+          set -euo pipefail
+          max_attempts=5
+          attempt=1
+          while true; do
+            # `set +e` around the call, then capture $? on the very next line. An
+            # earlier revision read `status=$?` after `if ...; then ...; fi`, which is
+            # ALWAYS 0: POSIX gives an `if` with a false condition and no `else` an
+            # exit status of 0. MEASURED 2026-08-30 -- `if output="$(false)"; then :;
+            # fi; echo $?` prints 0. That made the final `exit "$status"` exit 0, so a
+            # registry publish that failed all five attempts would have reported the
+            # job GREEN. A check that claims a success it never had is the exact defect
+            # this project exists to refuse; do not reintroduce the `if` form here.
+            set +e
+            output="$(./mcp-publisher publish 2>&1)"
+            status=$?
+            set -e
+            echo "$output"
+            if [ "$status" -eq 0 ]; then
+              break
+            fi
+            # The registry rejects re-publishing an already-published version with a
+            # 400 "cannot publish duplicate version". Treat only that exact case as a
+            # no-op success -- e.g. a re-run of this job for a tag that already made
+            # it to the registry. We do not have a reliable way to tell "not yet
+            # visible on PyPI" apart from other validation failures from the exit
+            # code alone, so every other failure is left to fail loudly rather than
+            # being masked by a blanket continue-on-error.
+            if printf '%s' "$output" | grep -qi "duplicate version"; then
+              echo "Version already published to the MCP registry; treating as success."
+              exit 0
+            fi
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              exit "$status"
+            fi
+            attempt=$((attempt + 1))
+            echo "Publish attempt failed (possibly PyPI propagation lag); retrying in 30s (attempt $attempt/$max_attempts)..."
+            sleep 30
+          done

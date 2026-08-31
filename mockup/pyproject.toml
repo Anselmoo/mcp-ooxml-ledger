@@ -1,0 +1,24 @@
+[project]
+name = "mcp-ooxml-edit"
+version = "0.1.0.dev0"
+description = "MCP server for editing Office documents with provable revision integrity"
+requires-python = ">=3.12"
+# MCP-first: the server IS the product, so fastmcp and typer are core.
+# The CLI is not an afterthought — it installs the server and enforces its use
+# via client hooks, which is the primary path for reach.
+dependencies = [
+    "lxml>=5",
+    "typer>=0.12",
+    "fastmcp>=3",
+]
+
+[project.scripts]
+mcp-ooxml-edit = "ooxml_edit.cli:main"
+mcp-ooxml-edit-hooks = "ooxml_edit.hooks:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ooxml_edit"]
