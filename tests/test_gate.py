@@ -1023,3 +1023,52 @@ def test_structural_is_true_where_an_engine_did_inspect(tmp_path, name):
     shutil.copy(CORPUS / name, doc)
     verdict = gate(doc, Package.open(doc, tmp_path / "w"), [], workdir=tmp_path / "g")
     assert verdict.structural is True
+
+
+#: Valid XML, correctly namespaced, and not WordprocessingML. `wml.tracked_parts` selects by
+#: PART NAME, never by content, so this part is still handed to the Word engine — which is
+#: what makes it the shape that reaches `structural_problems`.
+NOT_WORDPROCESSINGML = (
+    b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    b'<doc xmlns="urn:example:not-wordprocessingml"><p>text</p></doc>'
+)
+
+
+def test_a_result_part_the_word_engine_cannot_read_yields_a_verdict_not_a_raise(
+    tmp_path,
+):
+    """The gate must always answer. `structural_problems` used to make it stop answering.
+
+    `gate()` documents ONE raising channel, `GateFailure`, and `replay_forward` already
+    converts the engine's `EditRefused` into it for the BASELINE (see its `except
+    OoxmlLedgerError`). The RESULT had no such guard: `structural_problems` is called outside
+    any `try` at the end of `gate()`, and its Word loop reaches `duplicate_revision_ids` ->
+    `wml_attr_prefix` -> `wml_prefix`, which raises `EditRefused` on a part that declares no
+    WordprocessingML element. The caller got no verdict at all — not a refusal, not a
+    failure, nothing it could report — for a document whose defect this function was asked
+    to describe.
+
+    `pml.structural_problems` already solved exactly this for the relationship reader, and
+    says why in place: "a raise here would leave the caller with no verdict at all". This is
+    the Word half of that same fix.
+    """
+    baseline, result = _session(tmp_path)
+    result.write(DOC, NOT_WORDPROCESSINGML)
+
+    verdict = gate(baseline, result, [], tmp_path / "g")
+
+    assert verdict.ok is False
+    assert verdict.structural is False
+    assert any(DOC in problem for problem in verdict.failures), verdict.failures
+
+
+def test_the_unreadable_part_is_named_and_the_reason_is_the_engine_s_own(tmp_path):
+    """A problem string that said only "unreadable" would trade one silence for another."""
+    _baseline, result = _session(tmp_path)
+    result.write(DOC, NOT_WORDPROCESSINGML)
+
+    problems = structural_problems(result)
+
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(f"{DOC}: ")
+    assert "WordprocessingML" in problems[0]

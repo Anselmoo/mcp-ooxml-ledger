@@ -254,10 +254,27 @@ def structural_problems(pkg: Package) -> list[str]:
         out.extend(pml.structural_problems(pkg))
     for part in wml.tracked_parts(pkg):
         data = pkg.read(part)
-        dupes = wml.duplicate_revision_ids(data)
+        try:
+            dupes = wml.duplicate_revision_ids(data)
+            chains = list(wml._ancestor_chains(data))
+        except OoxmlLedgerError as exc:
+            # Reported rather than propagated, for exactly the reason `pml.structural_problems`
+            # states at its own `except`: this function is called outside any `try` at the end
+            # of `gate()`, so a raise here leaves the caller with NO VERDICT AT ALL — not a
+            # refusal, not a failure — on a document whose defect it was asked to describe.
+            # `commit_document` then masks it to `Error calling tool 'commit_document'`, in
+            # the one path this product exists for.
+            #
+            # `tracked_parts` selects by part NAME, never by content, so a `word/document.xml`
+            # that is valid XML and not WordprocessingML still arrives here and reaches
+            # `wml_attr_prefix` -> `wml_prefix`, which refuses it. That is a real structural
+            # defect of the RESULT, and saying so is the honest answer. `replay_forward`
+            # already makes the mirror-image guarantee for the BASELINE.
+            out.append(f"{part}: cannot be read by the Word engine: {exc}")
+            continue
         if dupes:
             out.append(f"{part}: revision w:id reused across marks: {dupes}")
-        for span, ancestors in wml._ancestor_chains(data):
+        for span, ancestors in chains:
             if span.name == wml.T and any(a.name == wml.DEL for a in ancestors):
                 out.append(
                     f"{part}: <w:t> inside <w:del> at byte {span.start}; must be "
