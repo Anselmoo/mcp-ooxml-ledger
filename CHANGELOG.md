@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`fastmcp` moved from the exact pin `==4.0.0b3` to the range `>=4.0.1,<5`.** FastMCP 4.0.0
+  went stable on 2026-08-31 and 4.0.1 followed on 2026-09-02. The exact pin's stated reason
+  was that `fastmcp>=4` was *unsatisfiable* — no GA release existed on PyPI and uv will not
+  select a pre-release for an unqualified range — so that reason expired rather than being
+  overruled. The half of it that survives is now carried by the **upper bound**: v4 was a
+  protocol-engine rewrite, so v5 gets measured before it is allowed in, never inherited from a
+  lockfile refresh. The cost the exact pin was silently paying, and the deciding argument once
+  it became avoidable: an exact pin in a published library cannot be co-installed beside any
+  other `fastmcp` consumer, and turns every upstream patch into a release here. `uv.lock`
+  still resolves CI, the container image and the `.mcpb` bundle byte-exactly.
+
+  **Nothing this server depends on moved across the beta-to-GA transition.** The full suite
+  was re-run on 4.0.1 before the pin changed: 1392 passed, 6 xfailed, and the single failure
+  was the version canary itself — which is what it exists to do.
+
+- **The fastmcp contract test's version canary became a *specifier* check.** While the pin was
+  exact, "the version moved" and "the pinned version moved" were the same statement. Under a
+  range they are not, and an equality check on the resolved version would fail on every
+  upstream patch — a canary whose only correct handling is to silence it. It now asserts that
+  the installed version is inside the declared range, and that the range in the test file is
+  **exactly** the one `pyproject.toml` declares, which is the one failure mode a range
+  introduces: a pin widened in one file alone. The behaviour assertions re-run against
+  whatever resolved, every CI run.
+
+### Added
+
+- **The v4 GA surface this server declines is now on the record, as assertions rather than
+  silence.** `cache_ttl`/`cache_scope` (server-level response caching) must stay unset: every
+  read tool answers a question about a file on disk that another process may change, so a
+  cached `verify` is a stale attestation — the one output this project exists not to produce.
+  The unbound functional `@tool(...)` form is confirmed to accept `annotations=` and is
+  declined because `create_server` is a factory. "We checked and chose not to" and "we never
+  looked" are different claims, and only one of them survives a version bump.
+
+- **`OOXML_LEDGER_ROOTS` being *the* path boundary is now a test.** v4 GA governs resource
+  templates with its own `resource_security` screening — a second path surface with different
+  rules from `Boundary._resolve`. The claim holds only while every client-supplied path
+  arrives as a tool argument, so the server is now asserted to expose no resources, no
+  resource templates and no prompts. Adding one fails, and sends the author to the boundary
+  argument first.
+
+### Fixed
+
+- **`commit_document` answered a bare `Error calling tool 'commit_document'` for a document
+  the Word engine cannot read — no reason at all, in the one path this product exists for.**
+  `gate.structural_problems` is called outside any `try` at the end of `gate()`, and its Word
+  loop reaches `wml.duplicate_revision_ids` → `wml_attr_prefix` → `wml_prefix`, which raises
+  `EditRefused` on a part that declares no WordprocessingML element. That is not a
+  `ToolError`, `engine_errors` has already closed by the time `gate()` is called, and
+  `commit_document` catches `GateFailure` alone — so `mask_error_details=True` replaced it
+  with a generic message and the caller was told nothing.
+
+  `tracked_parts` selects by part NAME and never by content, so a `word/document.xml` that is
+  valid XML and not WordprocessingML still reaches the Word engine. The gate now reports that
+  as the structural defect it is (`word/document.xml: cannot be read by the Word engine: …`)
+  instead of ceasing to answer — the same treatment `pml.structural_problems` already gave
+  the relationship reader, for the reason stated at its own `except`: *"a raise here would
+  leave the caller with no verdict at all."* `replay_forward` already made the mirror-image
+  guarantee for the baseline; the result had no guard. The verdict is `structural: False`
+  rather than `None`, deliberately: an engine did look, and `None` would claim none had.
+
+  Fixed in the engine, so the CLI gate gains it too. Regression tests at both levels —
+  `tests/test_gate.py` for the verdict-not-a-raise contract, `tests/test_mcp_commit.py` for
+  the message a client actually receives.
+
+- **Documentation cited planning documents that are not in this repository.** Eight
+  `plans/2026-08-*.md` citations across `docs/superpowers/specs/` name pre-publication scratch
+  that publication deliberately dropped. The citations that merely record what shipped
+  together are kept and disclosed in one place; the one that told a reader to *go and read* an
+  absent document — the `formats/pml.py` spec gap — now says plainly that there is nowhere to
+  send them, which is a wider gap than it previously read. `.superpowers/sdd/.gitignore` also
+  un-ignored a FastMCP reference file that was never committed, on the stated grounds that "a
+  committed plan must not point at a file that is not in the repository"; the file's substance
+  is now design § 7.2, where all eight of its open questions re-run as assertions.
+
 ## [0.2.1] - 2026-08-31
 
 Completes the 0.2.0 distribution. 0.2.0 reached PyPI and cut a GitHub Release, but

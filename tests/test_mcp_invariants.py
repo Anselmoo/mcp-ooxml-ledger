@@ -282,3 +282,44 @@ def test_a_tool_that_touches_a_receipt_declares_the_receipt_schema(server):
     for name in ("verify", "list_receipts", "export_receipt", "commit_document"):
         assert facts[name]["receipt_schema"] == info["receipt_schema"]
     assert "receipt_schema" not in facts["find_text"]
+
+
+def test_the_surface_is_tools_only_so_roots_stay_the_one_path_boundary(server):
+    """WHY THIS IS AN INVARIANT AND NOT AN OBSERVATION.
+
+    `OOXML_LEDGER_ROOTS`, resolved by `Boundary._resolve` (`mcp/guards.py`), is stated
+    everywhere in this project as THE filesystem boundary. That claim is only true while every
+    path a client can influence arrives as a TOOL ARGUMENT.
+
+    fastmcp v4 offers two other surfaces that take client-supplied strings — resource
+    TEMPLATES (`@server.resource("doc://{path}")`) and prompt arguments — and v4 GA governs the
+    first with its own, separate mechanism: `FastMCP(resource_security=ResourceSecurity(...))`,
+    defaulting to path-traversal, absolute-path and null-byte screening. That default is
+    reasonable and it is NOT `Boundary`: a templated resource would add a second path surface
+    with different rules, and the sentence "every path argument is resolved inside the roots"
+    would quietly become false while every existing test stayed green.
+
+    So this asserts the absence, not the configuration. Adding a resource or a prompt should
+    fail here and send the author to the boundary argument first.
+    """
+    import asyncio
+
+    from fastmcp import Client
+
+    async def run():
+        async with Client(server) as client:
+            return (
+                await client.list_resources(),
+                await client.list_resource_templates(),
+                await client.list_prompts(),
+            )
+
+    resources, templates, prompts = asyncio.run(run())
+    assert resources == [], (
+        "this server grew a resource; roots are no longer the only path boundary"
+    )
+    assert templates == [], (
+        "this server grew a resource TEMPLATE — the one surface v4's `resource_security` "
+        "governs instead of `Boundary`. Re-argue the boundary before adding it"
+    )
+    assert prompts == []

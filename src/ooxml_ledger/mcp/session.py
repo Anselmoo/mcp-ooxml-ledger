@@ -13,8 +13,8 @@ no TTL, no cleanup, and held everything in memory. Every one of those is fixed h
     three paths. A 200-slide deck never enters RAM;
   * sessions expire, and `sweep()` removes expired directories.
 
-Not `ctx.set_state`: measured on fastmcp 4.0.0b3, `Context.set_state`/`get_state` are
-coroutines (a synchronous call silently does nothing), and v4's sessionless mode does not
+Not `ctx.set_state`: measured on fastmcp 4.0.0b3 and again on 4.0.1 GA,
+`Context.set_state`/`get_state` are coroutines (a synchronous call silently does nothing), and v4's sessionless mode does not
 guarantee per-connection state survives between calls. Our ids are our own and arrive as tool
 arguments, so a process-wide dict keyed by them is both simpler and correct.
 

@@ -1,8 +1,11 @@
 # Per-phase execution scaffolding stays out of git.
 *
-# ...except this file, and the fastmcp reference that
-# docs/superpowers/plans/2026-08-27-mcp-server.md cites three times and tells its
-# reader to read before starting. A committed plan must not point at a file that
-# is not in the repository.
 !.gitignore
-!fastmcp-v4-reference.md
+# There was one exception here: `fastmcp-v4-reference.md`, un-ignored because
+# `docs/superpowers/plans/2026-08-27-mcp-server.md` cited it three times and told its reader
+# to read it first -- "a committed plan must not point at a file that is not in the
+# repository." Both documents were pre-publication scratch and neither reached the published
+# tree, so the exception protected a link nobody could follow and the comment asserting
+# otherwise was false. The notes' substance -- their eight UNCERTAIN items and the measured
+# answers -- now lives in `docs/superpowers/specs/ooxml-ledger-design.md` section 7.2, where
+# every row re-runs as an assertion in `tests/test_fastmcp_contract.py`.

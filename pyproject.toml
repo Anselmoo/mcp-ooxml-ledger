@@ -30,11 +30,22 @@ dependencies = [
     "rfc8785>=0.1.4",
     # CORE, NOT AN EXTRA: this project IS an MCP server; a prior revision hid it behind an
     # optional `mcp` extra, trading the product being built for install convenience.
-    # EXACT pin, deliberately: `fastmcp>=4` is unsatisfiable (only 4.0.0a1/a2/b1/b2/b3 exist
-    # on PyPI; uv won't select a pre-release for an unqualified range). Beta was chosen
-    # knowingly over v3-on-maintenance and the official SDK's MCPServer. A range would let a
-    # beta-to-beta break arrive via lockfile refresh. DO NOT relax to >=4 or >=4.0.0b3.
-    "fastmcp==4.0.0b3",
+    # RANGE, since 4.0.0 went GA (2026-08-31) and 4.0.1 followed (2026-09-02). This was
+    # `==4.0.0b3`, and the reason given was that `fastmcp>=4` was UNSATISFIABLE -- only
+    # 4.0.0a1/a2/b1/b2/b3 existed and uv will not select a pre-release for an unqualified
+    # range -- so the choice was an exact beta or nothing. That reason is now void, and
+    # leaving the pin in place would keep a constraint whose stated justification no longer
+    # holds. A range is the honest replacement: `uv.lock` still resolves CI, the container
+    # and the mcpb bundle byte-exactly, while an exact pin in a PUBLISHED library cannot be
+    # co-installed beside any other fastmcp consumer and turns every upstream patch into a
+    # release here.
+    #
+    # The upper bound is the part that is load-bearing. v4 was a protocol-engine rewrite,
+    # so v5 gets measured before it is allowed in, never inherited from a lockfile refresh.
+    # `tests/test_fastmcp_contract.py` is what makes the lower half safe: it asserts THIS
+    # EXACT SPECIFIER against pyproject.toml and re-runs every fastmcp behaviour this
+    # server depends on, so a 4.0.x that arrives through a refresh is measured, not assumed.
+    "fastmcp>=4.0.1,<5",
 ]
 
 [project.urls]

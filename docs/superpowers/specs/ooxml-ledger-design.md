@@ -1,15 +1,16 @@
 # mcp-ooxml-ledger — Design
 
-**State at writing:** initial public commit · 1392 tests · living design doc (mission,
-architecture, the gate, phasing); this is the point the §1/§9/§12 PowerPoint corrections
-below were last verified against, not a freeze date — revise the anchor whenever this
+**State at writing:** HEAD `15f082f` · 1406 tests · living design doc (mission, architecture,
+the gate, phasing); last substantively corrected for the FastMCP 4.0.0 GA release — §7's pin,
+the new §7.2, and the superseding §12 row — not a freeze date. Revise the anchor whenever this
 document is next substantively corrected.
 
-This anchor names no sha. The repository's pre-publication history was squashed into a
-single initial commit before release, so the sha this document previously quoted no longer
-resolves and cannot support the `git log <sha>..HEAD` drift check the anchor is for. The
-test count is re-runnable with `uv run pytest --collect-only -q`; from the next revision on,
-a real sha belongs here again.
+**This anchor names a sha again**, which the previous one could not. The repository's
+pre-publication history was squashed into a single initial commit before release, so the sha
+this document quoted before that squash no longer resolved and could not support the
+`git log <sha>..HEAD` drift check an anchor is for. `15f082f` is that squashed initial commit,
+it resolves, and the check works: `git log 15f082f..HEAD` shows exactly how far this document
+may have drifted since. The test count re-runs with `uv run pytest --collect-only -q`.
 
 **The same applies to every short sha cited in the prose below** — in §1's build-status
 note, §4.5, the §9 phase table and the §12 decisions log. Those citations were written
@@ -669,7 +670,7 @@ name = "mcp-ooxml-ledger"
 version = "0.1.0.dev0"
 requires-python = ">=3.13"
 # no lxml — see §10.1. `fastmcp` IS here, in CORE: see the MCP SDK note below.
-dependencies = ["pydantic>=2.12", "typer>=0.12", "rfc8785>=0.1.4", "fastmcp==4.0.0b3"]
+dependencies = ["pydantic>=2.12", "typer>=0.12", "rfc8785>=0.1.4", "fastmcp>=4.0.1,<5"]
 
 [project.scripts]
 ooxml-ledger = "ooxml_ledger.cli:main"
@@ -694,20 +695,32 @@ Sources at `src/ooxml_ledger/`. Notes:
   while declaring `fastmcp>=3` (a *different* package). Two unrelated projects, shared name
   history.
 
-  Corrected: the dependency is **`fastmcp==4.0.0b3`, pinned exactly, in CORE `dependencies` —
-  never an optional extra, and never a range.** This project IS an MCP server; a build without
-  the server is a different product, not a reduced install of this one — an earlier revision put
-  it in an optional `mcp` extra and that traded the thing being built for a packaging
-  convenience. Two reasons for the exact pin, both measured: (1) `fastmcp>=4` is unsatisfiable —
-  no GA v4 exists on PyPI, only `4.0.0a1/a2/b1/b2/b3`, and uv will not select a pre-release for an
-  unqualified range — the line originally above could not be installed. (2) An exact pin makes
-  every bump a deliberate act by a human who has re-read the migration guide; a range would let a
-  beta-to-beta API break arrive through a lockfile refresh; `tests/test_fastmcp_contract.py` is
-  what such a human runs first. `pydantic` floors at `>=2.12` because FastMCP v4 requires it and
-  fails to install below it. `rfc8785` (JCS, receipt-format §4.3) has been a dependency since
-  Phase 1 and was missing from this section. The engine still never imports `fastmcp` — that
-  boundary is about the TRANSPORT, not about installability, and `tests/test_import_graph.py`
-  enforces it structurally.
+  Corrected: the dependency is **`fastmcp>=4.0.1,<5`, in CORE `dependencies` — never an
+  optional extra.** This project IS an MCP server; a build without the server is a different
+  product, not a reduced install of this one — an earlier revision put it in an optional `mcp`
+  extra and that traded the thing being built for a packaging convenience. `pydantic` floors at
+  `>=2.12` because FastMCP v4 requires it and fails to install below it. `rfc8785` (JCS,
+  receipt-format §4.3) has been a dependency since Phase 1 and was missing from this section.
+  The engine still never imports `fastmcp` — that boundary is about the TRANSPORT, not about
+  installability, and `tests/test_import_graph.py` enforces it structurally.
+
+  **The pin was `==4.0.0b3` and is now a range; the reason it was exact expired rather than
+  being overruled.** Both original reasons are recorded here because only one of them was ever
+  about beta-ness. (1) `fastmcp>=4` was *unsatisfiable*: no GA v4 existed on PyPI, only
+  `4.0.0a1/a2/b1/b2/b3`, and uv will not select a pre-release for an unqualified range — the
+  line originally written above could not be installed at all. FastMCP 4.0.0 shipped
+  2026-08-31 and 4.0.1 on 2026-09-02, so this reason is now void as a matter of fact, not of
+  judgement. (2) An exact pin made every bump a deliberate act by a human who had re-read the
+  migration guide, and stopped a beta-to-beta API break arriving through a lockfile refresh.
+  That reason survives the GA in weakened form and is what the **upper bound** now carries: v4
+  was a protocol-engine rewrite, so v5 gets measured before it is allowed in. Below the
+  ceiling, `tests/test_fastmcp_contract.py` does the work the pin used to do — it asserts the
+  declared specifier itself and re-runs every fastmcp behaviour this server depends on, so a
+  4.0.x arriving through a refresh is *measured every CI run* rather than merely *announced*.
+  The cost the exact pin was silently paying: an exact pin in a PUBLISHED library cannot be
+  co-installed beside any other fastmcp consumer, and makes every upstream patch a release
+  here. That cost was invisible while the pin was unavoidable, and became the deciding
+  argument the moment it was not.
 - Tool annotations (`ToolAnnotations(read_only_hint=True)`) mark auto-approvable tools.
   `commit` and the sanitize verbs never carry them. Note the SDK's own caveat: annotations
   are hints, and clients must not make trust decisions from an untrusted server's hints —
@@ -724,6 +737,55 @@ Sources at `src/ooxml_ledger/`. Notes:
   keep the handle outside the model.
 - Hot paths that construct thousands of objects per document use `model_construct()` to
   skip validation.
+
+---
+
+### 7.2 FastMCP v4: what was uncertain, and what was measured
+
+The v4 surface was planned against a set of reference notes written before anything was
+built, whose most useful feature was an explicit **UNCERTAIN** list — eight items the notes
+could not confirm from documentation and told the reader to check empirically before writing
+code against them. Those notes were gitignored per-task scratch and never entered the
+repository; the answers are recorded here instead, because an answer whose only record is a
+scratch file is an answer the next reader has to re-derive.
+
+Every row below is asserted in `tests/test_fastmcp_contract.py` against the *installed*
+fastmcp, so these are not historical notes — they re-run.
+
+| # | The open question | Measured answer | Pinned by |
+|---|---|---|---|
+| 1 | Does a tool returning `list[Model]` produce a usable `structuredContent`? | Yes, but WRAPPED: a bare list arrives as `{"result": [...]}`, a model arrives under its own field names. This is why every tool here returns a wrapper model instead of a bare list — the caller would otherwise have to know a shape that changes if the return annotation is ever widened | `test_a_bare_list_return_is_wrapped_under_result` |
+| 2 | How is structured output actually disabled? | `@server.tool(output_schema=None)`, a decorator kwarg. **Declined**: it hides the schema and still emits the structured content, which is strictly worse than the derived schema every tool here gets for free | `test_the_tool_decorator_accepts_an_output_schema_kwarg`, `test_output_schema_none_hides_the_schema_but_still_emits_structured_content` |
+| 3 | Where does `mask_error_details` live? | A `FastMCP(...)` constructor kwarg. **Adopted** — and it is the fact the entire refusal policy rests on: a `ToolError` message reaches the client verbatim, any other exception is replaced by a generic one | `test_mask_error_details_is_a_constructor_kwarg`, and both halves in `test_a_tool_error_message_reaches_the_client_even_with_masking_on` / `test_a_plain_exception_is_masked_and_its_message_never_leaks` |
+| 4 | Does `ToolAnnotations` accept snake_case at CONSTRUCTION, or only bridge snake_case reads? | Both. Construction, `model_dump()` and read-back are all snake_case; the camelCase forms survive as a deprecation-warning shim | `test_tool_annotations_accept_snake_case_and_read_back_snake_case` |
+| 5 | What is the result object's structured-content attribute called? | `result.structured_content`. The trap the notes were right to flag: `result.data` also exists but is a model RECONSTRUCTED from the JSON schema, so equality against the server's own class is `False` — every assertion in this repo goes through `structured_content` because of it | `test_the_result_object_exposes_structured_content`, `test_result_data_is_not_the_servers_model_class` |
+| 6 | What is the shape of `Client(..., mode=...)`? | A real `Client.__init__` parameter. **Declined**: sessions here are keyed by our own ids on disk, so nothing depends on protocol-era negotiation | `test_client_accepts_a_mode_kwarg` |
+| 7 | Is `4.0.0b3` close to a GA `4.0.0`, or far from it? | **Close, and now moot.** Two further betas followed (`4.0.0b4` 2026-08-26, `4.0.0b5` 2026-08-28), GA `4.0.0` shipped 2026-08-31 — seventeen days after b3 — and `4.0.1` on 2026-09-02. The pin moved to `>=4.0.1,<5`; see §7 and the decisions log | the specifier itself, in `test_the_supported_range_is_exactly_what_pyproject_declares` |
+| 8 | Does the unbound functional `@tool(...)` form accept `annotations=`? | Yes — `fastmcp.tools.tool` carries the same parameters as the bound `FastMCP.tool` apart from `app`. The notes saw a reduced signature most likely because it is **not exported from the `fastmcp` top level**: `from fastmcp import tool` raises `ImportError`. **Declined** for an unrelated reason — `create_server` is a factory, and a decorator that registers against no particular instance cannot express that | `test_the_functional_tool_form_accepts_annotations_the_same_way` |
+
+**What GA added, and what this server does with it.** v4.0.0 brought interactive tools,
+`add_extension()`, background tasks, argument completion, `ClientGroup`, dependency injection
+with `Depends(..., CallArgument(...))`, and server-level cache hints. None is adopted, and two
+of those refusals are load-bearing rather than "not yet":
+
+- **`cache_ttl` / `cache_scope` must stay unset.** Every read tool answers a question about a
+  file on disk that another process may change a millisecond later. A cached `verify` is a
+  stale attestation, which is the one output this project exists not to produce. Both defaults
+  are already `None`; `test_server_level_response_caching_is_off_unless_asked_for` asserts it
+  so a later contributor adding a TTL for a benchmark has to argue past a test.
+- **`resource_security` is irrelevant only while there are no resources.** It is v4's
+  path-traversal screening for resource TEMPLATES — a second path surface, governed by
+  different rules than `Boundary._resolve`. The claim "`OOXML_LEDGER_ROOTS` is the security
+  boundary" holds only while every client-supplied path arrives as a tool argument, so the
+  absence is now asserted:
+  `test_the_surface_is_tools_only_so_roots_stay_the_one_path_boundary` fails if this server
+  ever grows a resource, a template or a prompt.
+
+Background tasks were already rejected twice over (every tool here is synchronous, and without
+the extension the failure is a *connection* failure rather than a degraded tool); per-tool
+`auth` is skipped entirely under stdio, the only transport `main()` uses; and `timeout` cannot
+interrupt a synchronous body at all. Each of those has its own assertion in the contract file,
+and each was measured on `4.0.0b3` and re-measured unchanged on `4.0.1`.
 
 ---
 
@@ -765,7 +827,7 @@ Test client: `fastmcp`'s in-memory `Client(server)` — no subprocess.
 |---|---|---|
 | **1. Substrate** ✅ **COMPLETE** | `pkg`, `canon` + normalisation filter, `ledger` model, `verify`, CLI | 248 tests green on a 10-document real-Office corpus; see `plans/2026-08-26-substrate.md` |
 | **2. Word** ✅ **COMPLETE** | tracked + direct edits, run-fragmentation handling, visibility check, paragraph delete/insert, `w:id` allocation, the foreign-revision guard, and the accountability gate | 511 tests green on the same corpus; see `plans/2026-08-26-word-editing.md`. **The stated exit criterion — reproduce the v12→v13 manuscript redline from tool calls only — was NOT run**, because that manuscript is not in the repository. What was verified instead is §4.1's own counterexample, end to end on a real docx carrying another author's unaccepted redline: `test_the_counterexample_from_design_4_1`, which fails against the un-scoped formula (verified by sabotage: 4 tests red). Substituting a narrower criterion is recorded here rather than quietly claiming the original |
-| **3. MCP** ✅ **COMPLETE** | fastmcp v4 surface (`fastmcp==4.0.0b3`, CORE dependency — this project IS an MCP server), on-disk sessions with an append-only working journal, OPC relationship resolution, per-format outline and text search, the server-side commit gate, honest tool annotations | Agent completes open → inspect → verify → commit without touching a generic file tool; see `plans/2026-08-27-mcp-server.md`. **`commit_document` calls the engine's own `gate()` — §4.1 has one implementation and the server is not it** — so the replay, the §4.3-scoped visibility check and the §4.2 disclosures all behave here exactly as they do in the CLI, and `attestation_for` refuses to attest a session whose ledger omits a disclosure it owes. **The stated exit criterion said open→EDIT→verify→commit and no editing verb ships in this phase**, deliberately and on scope, not because the engine is missing: with no tool that records an operation, every ledger this server's own tool surface can produce is empty, and the gate is exercised on a non-empty one only by tests that make the edit with the engine directly. Substituting the narrower criterion is recorded here rather than quietly claiming the original. **That narrower criterion held only through this commit (`a43b803`).** Follow-on work put four editing tools over the existing Word engine: `plans/2026-08-29-editing-verbs.md` shipped `preview_edits` and `apply_edits` (`95b87d2`), and a later, undocumented-by-plan task added `delete_paragraph` and `insert_paragraph` (`1c47f02`) — the same plan lists both as explicitly out of scope, pending their own task. Together they bring the surface to **14 tools** in total (`server_info`, `digest`, `verify`, `list_receipts`, `describe_structure`, `find_text`, `open_document`, `close_document`, `export_receipt`, `commit_document`, `preview_edits`, `apply_edits`, `delete_paragraph`, `insert_paragraph`) and flipping `server_info.editing_available` to **`true`**. **Word only at the time this phase closed** — `formats/` then held nothing but `wml.py`,
+| **3. MCP** ✅ **COMPLETE** | fastmcp v4 surface (`fastmcp>=4.0.1,<5`, CORE dependency — this project IS an MCP server), on-disk sessions with an append-only working journal, OPC relationship resolution, per-format outline and text search, the server-side commit gate, honest tool annotations | Agent completes open → inspect → verify → commit without touching a generic file tool; see `plans/2026-08-27-mcp-server.md`. **`commit_document` calls the engine's own `gate()` — §4.1 has one implementation and the server is not it** — so the replay, the §4.3-scoped visibility check and the §4.2 disclosures all behave here exactly as they do in the CLI, and `attestation_for` refuses to attest a session whose ledger omits a disclosure it owes. **The stated exit criterion said open→EDIT→verify→commit and no editing verb ships in this phase**, deliberately and on scope, not because the engine is missing: with no tool that records an operation, every ledger this server's own tool surface can produce is empty, and the gate is exercised on a non-empty one only by tests that make the edit with the engine directly. Substituting the narrower criterion is recorded here rather than quietly claiming the original. **That narrower criterion held only through this commit (`a43b803`).** Follow-on work put four editing tools over the existing Word engine: `plans/2026-08-29-editing-verbs.md` shipped `preview_edits` and `apply_edits` (`95b87d2`), and a later, undocumented-by-plan task added `delete_paragraph` and `insert_paragraph` (`1c47f02`) — the same plan lists both as explicitly out of scope, pending their own task. Together they bring the surface to **14 tools** in total (`server_info`, `digest`, `verify`, `list_receipts`, `describe_structure`, `find_text`, `open_document`, `close_document`, `export_receipt`, `commit_document`, `preview_edits`, `apply_edits`, `delete_paragraph`, `insert_paragraph`) and flipping `server_info.editing_available` to **`true`**. **Word only at the time this phase closed** — `formats/` then held nothing but `wml.py`,
 so pptx and xlsx were covered for canonicalisation, receipts, gate replay and `verify` with
 no editing engine of their own. That changed in Phase 5 (below): `pml.py` shipped
 (`2041b44`..`3bd53c1`) and was wired into `preview_edits`/`apply_edits` in `c1ee02e` — see
@@ -1021,6 +1083,7 @@ question:
 | pydantic v2, discriminated-union `Operation` | user, explicit; union is the ledger's core type |
 | expat byte-offset location + byte splicing; never re-serialize | measured: lxml silently reorders attributes on real Excel `workbook.xml`; no option fixes it |
 | `fastmcp==4.0.0b3`, exact pin, CORE `dependencies` — never an optional extra (Phase 3) | `>=4` is unsatisfiable — no GA v4 on PyPI and uv will not select a pre-release for an unqualified range; a range would let a beta-to-beta API break arrive through a lockfile refresh. This project IS an MCP server, so a build without the server is a different product, not a reduced install of this one — an interim revision put this in an optional `mcp` extra and that traded the thing being built for a packaging convenience. Supersedes §7's original `fastmcp>=4` in core AND the interim optional-extra design |
+| `fastmcp>=4.0.1,<5`, a RANGE, CORE `dependencies` (0.2.2) | **Supersedes the exact-pin row above, which expired rather than being overruled.** That row's first reason — `>=4` is unsatisfiable, no GA v4 on PyPI — stopped being a fact when 4.0.0 shipped 2026-08-31 (4.0.1 on 2026-09-02), and a constraint whose stated justification is void is one nobody downstream can evaluate. Its second reason (a bump must be a deliberate, measured act, never a lockfile refresh) is kept, and is now carried by the CEILING: v4 was a protocol-engine rewrite, so v5 gets measured before it is allowed in. Below the ceiling the guard moved from the pin to `tests/test_fastmcp_contract.py`, which asserts the DECLARED SPECIFIER against `pyproject.toml` and re-runs every fastmcp behaviour this server depends on against whatever resolved — the range is safe because it is measured continuously, not because 4.0.x is trusted. The cost the exact pin was silently paying, and the deciding argument once it became avoidable: an exact pin in a PUBLISHED library cannot be co-installed beside any other fastmcp consumer, and turns every upstream patch into a release here. Measured at the change: b3 → 4.0.1 moved no behaviour this server depends on — the full suite ran 1392 passed / 6 xfailed / 1 failed, and the single failure was the version canary itself, which is what it exists to do |
 | The MCP server has NO gate of its own; `commit_document` calls `ooxml_ledger.gate.gate` (Phase 3) | Phase 3 was planned before Phase 2 and its draft carried a second §4.1 implementation over part-digest manifests. They reconcile because the session's `pkg/` tree is a baseline `SessionRegistry.load` re-verifies on every call, and `Package.save()` turns it back into a container the engine's gate can open — measured canon-identical on all ten corpus documents. Pinned structurally by `tests/test_mcp_one_gate.py`: an identity assertion on the bound function, a scan for any `mcp/*.py` quoting the §4.1 section number, and an AST scan for a locally-defined replay/accountability function. Behavioural tests cannot catch a duplicate that starts out identical |
 | The engine/server import boundary is executable, not a convention (Phase 3) | a static AST scan and a runtime subprocess probe over every engine module, both in `tests/test_import_graph.py`. A convention is a comment; this fails CI |
 | Read tools serve a session snapshot; `SessionRegistry.load` proves it is still the recorded baseline, and `load_raw` keeps that check recoverable (Phase 3) | `describe_structure`/`find_text` answer from the session's unpacked `pkg/` while `digest`/`verify`/`commit_document` read the file on disk, and nothing else reconciled the two. `load` re-derives the manifest of `pkg/` on every call and refuses if it drifted; `close_document` goes through `load_raw`, which skips only that check, because a guard whose own failure mode is unrecoverable forces a fall back to a generic file tool. `meta.json` also records the document's size and mtime so both read reports can flag, for one `stat()`, that the FILE moved. The same re-verification is what makes `commit_document` able to hand the engine's gate a trustworthy baseline |

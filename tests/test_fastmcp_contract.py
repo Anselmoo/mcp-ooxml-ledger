@@ -8,9 +8,19 @@ existing. Those four are the dangerous kind: true, believed, and — until now �
 rationale nobody tests is a rationale a beta bump can silently invalidate, leaving the plan's
 prose asserting a reason that no longer holds.
 
-Several rows resolve items that .superpowers/sdd/fastmcp-v4-reference.md lists as UNCERTAIN, so
-this file is where the plan's assumptions stop being assumptions. If the pin moves, this fails
-first.
+Several rows resolve items that the v4 planning notes listed as UNCERTAIN, so this file is
+where the plan's assumptions stopped being assumptions. Those resolutions now live in
+`docs/superpowers/specs/ooxml-ledger-design.md` § 'FastMCP v4: what was uncertain and what
+was measured' — the notes themselves were gitignored per-task scratch and were never part of
+the published repository, and an answer whose only record is a scratch file is an answer the
+next reader has to re-derive.
+
+WHAT THIS FILE GUARDS CHANGED AT 4.0.0 GA. Under the old `fastmcp==4.0.0b3` pin, a version
+canary and a behaviour suite were the same statement: nothing could resolve differently
+without the pin moving. `pyproject.toml` now declares a RANGE, so a 4.0.x can arrive through
+a lockfile refresh with no edit here. The canary is therefore no longer an equality check on
+the version — it is an equality check on the SPECIFIER, and the behaviour suite below is what
+actually re-measures, every CI run, against whatever resolved.
 
 Note: the two masking assertions here also appear in `tests/test_mcp_masking_contract.py`,
 which Task 4 runs before any guard exists. That duplication is deliberate — see that file's
@@ -19,11 +29,16 @@ docstring.
 
 import asyncio
 import inspect
+import pathlib
 import threading
 import time
+import tomllib
 import warnings
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 
 pytest.importorskip("fastmcp")
 
@@ -33,7 +48,19 @@ from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel
 
-EXPECTED_VERSION = "4.0.0b3"
+#: The window `pyproject.toml` permits. Written out HERE and asserted against pyproject below,
+#: rather than parsed from it and trusted: a range's one new failure mode is somebody widening
+#: the pin without re-running this file, and a test that derives its expectation from the thing
+#: it is checking cannot catch that.
+SUPPORTED = SpecifierSet(">=4.0.1,<5")
+
+#: The version every assertion below was last re-run against BY HAND, with the result recorded
+#: in `docs/superpowers/plans/2026-09-02-fastmcp-v4-ga.md`. Deliberately NOT asserted equal to
+#: what is installed. Under the old exact pin that equality was free; under a range it would
+#: fail on every upstream patch, which would make the honest response "bump the constant" — a
+#: canary whose correct handling is to silence it. The real measurement is that all 30-odd
+#: assertions below re-execute against whatever resolved, on every run.
+MEASURED_AGAINST = "4.0.1"
 
 
 class Item(BaseModel):
@@ -82,10 +109,45 @@ def _call(server, name, params=None):
     return asyncio.run(run())
 
 
-def test_the_pinned_version_is_what_is_installed():
-    assert fastmcp.__version__ == EXPECTED_VERSION, (
-        f"this plan was written against {EXPECTED_VERSION}. Re-run every assertion in this "
-        "file before building on a different version."
+def test_the_installed_version_is_inside_the_supported_range():
+    """Outside the range, nothing below is evidence of anything.
+
+    This is the assertion the old `== "4.0.0b3"` canary became. It is weaker on purpose: a
+    range exists precisely so a 4.0.x patch can arrive without a release here, and a check
+    that refused one would be a check whose only correct response is to edit it away.
+    """
+    installed = Version(fastmcp.__version__)
+    assert installed in SUPPORTED, (
+        f"fastmcp {installed} is outside {SUPPORTED}, which pyproject.toml declares and this "
+        f"file's assertions were measured within. Nothing below this line is evidence about "
+        f"{installed}."
+    )
+    assert Version(MEASURED_AGAINST) in SUPPORTED, (
+        f"MEASURED_AGAINST={MEASURED_AGAINST} is outside {SUPPORTED} — the recorded "
+        "measurement is of a version the project no longer permits."
+    )
+
+
+def test_the_supported_range_is_exactly_what_pyproject_declares():
+    """The cross-file half, and the one a range actually needs.
+
+    `SUPPORTED` above is what the assertions in this file were reasoned about. `pyproject.toml`
+    is what users and `uv.lock` resolve against. While the pin was exact those two could not
+    drift without somebody noticing; a range can be widened in one file alone, and the widening
+    would be invisible until an untested fastmcp broke something in production. Asserting
+    equality of the two SPECIFIERS — not of a resolved version — is what closes that.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    declared = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    requirements = [Requirement(d) for d in declared["project"]["dependencies"]]
+    fastmcp_requirements = [r for r in requirements if r.name == "fastmcp"]
+    assert len(fastmcp_requirements) == 1, (
+        "pyproject.toml declares fastmcp zero or more than once; this file assumes exactly one"
+    )
+    assert fastmcp_requirements[0].specifier == SUPPORTED, (
+        f"pyproject.toml declares fastmcp{fastmcp_requirements[0].specifier} but this file's "
+        f"assertions were measured against {SUPPORTED}. Widening the pin without re-running "
+        f"this file is the one failure a range reintroduces — this is that failure."
     )
 
 
@@ -158,8 +220,7 @@ def test_context_state_accessors_are_coroutines():
 
     `mcp/session.py` gives two reasons for not using `ctx.set_state`/`get_state` for the
     session registry. The first (v4's sessionless mode does not guarantee per-call state
-    survives) is documented behaviour. THIS is the second: in 4.0.0b3 both accessors are
-    coroutines, so a synchronous `ctx.set_state(...)` silently does nothing and emits only a
+    survives) is documented behaviour. THIS is the second: both accessors are coroutines, so a synchronous `ctx.set_state(...)` silently does nothing and emits only a
     `RuntimeWarning` — a state store that appears to work and loses every write.
 
     If a later version makes them synchronous, this test goes red and the session module's
@@ -404,7 +465,8 @@ def test_sync_tools_run_off_the_event_loop_by_default():
 
 
 def test_timeout_does_not_abort_a_slow_sync_tool_and_reports_success():
-    """MEASURED IN 4.0.0b3, AND THE REASON NO TOOL HERE CARRIES `timeout`.
+    """MEASURED IN 4.0.0b3 AND RE-MEASURED UNCHANGED AT 4.0.1 GA, AND THE REASON NO TOOL
+    HERE CARRIES `timeout`.
 
     A sync body runs via anyio.to_thread.run_sync, which shields the wait from cancellation
     (abandon_on_cancel=False). `anyio.fail_after` raises only when its scope CAUGHT a
@@ -539,3 +601,48 @@ def test_per_tool_version_lets_two_versions_of_one_name_coexist():
     assert sorted(listed[0].meta["fastmcp"]["versions"]) == ["1", "2"]
     assert newest.structured_content["result"] == "canon v2"
     assert oldest.structured_content["result"] == "canon v1"
+
+
+def test_the_functional_tool_form_accepts_annotations_the_same_way():
+    """The last of the v4 planning notes' UNCERTAIN items, closed.
+
+    The notes recorded that only `name=`, `description=` and `tags=` had been seen on the
+    alternate, unbound `@tool(...)` decorator, and that whether it also took
+    `annotations=ToolAnnotations(...)` "was not confirmed either way". It does:
+    `fastmcp.tools.tool` carries the same parameters as the bound `FastMCP.tool` apart from
+    `app`. Note it is NOT exported from the `fastmcp` top level — `from fastmcp import tool`
+    raises `ImportError` — which is most likely how the notes came to see a reduced signature.
+
+    Resolved and DECLINED, for a reason that has nothing to do with the signature:
+    `create_server` is a FACTORY, so a decorator that registers against no particular server
+    instance cannot express what every tool here needs. Pinned so "we checked and chose the
+    bound form" stays distinguishable from "we never checked".
+    """
+    from fastmcp.tools import tool as unbound_tool
+
+    with pytest.raises(ImportError):
+        from fastmcp import tool  # noqa: F401
+
+    unbound = set(inspect.signature(unbound_tool).parameters)
+    bound = set(inspect.signature(FastMCP.tool).parameters)
+    assert "annotations" in unbound
+    assert unbound == bound - {"self", "app"}
+
+
+def test_server_level_response_caching_is_off_unless_asked_for():
+    """NEW IN v4 GA AND DELIBERATELY UNUSED — the one new option that would be actively wrong.
+
+    `FastMCP(cache_ttl=..., cache_scope=...)` emits server-level cache hints so a gateway may
+    reuse a response. Every read tool in this server answers a question ABOUT A FILE ON DISK
+    that another process may change a millisecond later: a cached `verify` is a stale
+    attestation, and a stale attestation is the single output this project must never produce.
+    `digest` has the same shape, and `list_receipts` reads a directory.
+
+    So this is not "we did not get to it" — a future contributor adding a TTL to make a
+    benchmark look better would be trading the product for the benchmark. Both defaults are
+    asserted, because the safety here is that the defaults are already correct and nothing
+    passes them.
+    """
+    parameters = inspect.signature(FastMCP.__init__).parameters
+    assert parameters["cache_ttl"].default is None
+    assert parameters["cache_scope"].default is None
