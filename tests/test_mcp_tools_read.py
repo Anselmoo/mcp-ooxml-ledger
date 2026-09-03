@@ -218,7 +218,8 @@ def test_read_reports_label_the_baseline_digest_as_at_open(server, docx):
     about the file on disk. It is not — it is the digest AS OPENED, of the working copy these
     results came from. The schema has to say so, because that is what an agent sees."""
     sid = session_for(server, "ms.docx")
-    # `.output_schema`, NOT `.outputSchema`. MEASURED against 4.0.0b3, and the measurement is
+    # `.output_schema`, NOT `.outputSchema`. MEASURED against 4.0.0b3 and re-measured unchanged
+    # at 4.0.1 GA, and the measurement is
     # order-dependent, so it is written out rather than summarised: `client.list_tools()`
     # returns `mcp.types.Tool`, and once `fastmcp` has been imported — which it always has
     # been here — its compatibility shim makes `.outputSchema` resolve while emitting

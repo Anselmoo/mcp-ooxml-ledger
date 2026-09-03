@@ -112,7 +112,7 @@ def test_open_does_not_modify_the_document(server, docx):
 
 def test_a_session_is_reachable_from_a_new_client_connection(server, docx):
     """Each harness call opens a fresh connection. If session state lived in transport state —
-    `ctx.set_state`, which is a coroutine in 4.0.0b3 and sessionless in v4 — this fails."""
+    `ctx.set_state`, which is a coroutine and sessionless in v4 — this fails."""
     sid = open_doc(server)["session_id"]
     assert (
         call(server, "describe_structure", {"session_id": sid}).structured_content[

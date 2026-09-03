@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Guidance for an agent working in this repo. `mcp-ooxml-ledger` (import name `ooxml_ledger`) is
-an MCP server (fastmcp 4.0.0b3, stdio) plus a CLI that edit and verify OOXML documents
+an MCP server (fastmcp v4, `>=4.0.1,<5`, stdio) plus a CLI that edit and verify OOXML documents
 (Word/PowerPoint/Excel). Python 3.13+, uv + uv_build. README is for users; this file is for
 contributors and agents — do not duplicate README content here, extend it.
 

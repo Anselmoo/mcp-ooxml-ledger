@@ -254,22 +254,53 @@ def structural_problems(pkg: Package) -> list[str]:
         out.extend(pml.structural_problems(pkg))
     for part in wml.tracked_parts(pkg):
         data = pkg.read(part)
-        dupes = wml.duplicate_revision_ids(data)
-        if dupes:
-            out.append(f"{part}: revision w:id reused across marks: {dupes}")
-        for span, ancestors in wml._ancestor_chains(data):
-            if span.name == wml.T and any(a.name == wml.DEL for a in ancestors):
-                out.append(
-                    f"{part}: <w:t> inside <w:del> at byte {span.start}; must be "
-                    "<w:delText>, or accepting the deletion keeps the text"
-                )
-            if span.name in wml.REVISION_MARKS and any(
-                a.name in wml.REVISION_MARKS for a in ancestors
-            ):
-                out.append(
-                    f"{part}: nested revision marks at byte {span.start}; schema-legal and "
-                    "Word-unsupported (design §4.3)"
-                )
+        # WHY THIS IS GUARDED: this function is called outside any `try` at the end of
+        # `gate()`, so a raise here leaves the caller with NO VERDICT AT ALL — not a refusal,
+        # not a failure — on a document whose defect it was asked to describe.
+        # `commit_document` then masks it to `Error calling tool 'commit_document'`, in the
+        # one path this product exists for. `pml.structural_problems` states the same reason
+        # at its own `except`; this is the Word half of that guard.
+        #
+        # WHY THE SCAN STREAMS: `_ancestor_chains` is a GENERATOR yielding one
+        # `(span, tuple(ancestors))` per element. An earlier revision wrapped it in `list(...)`
+        # so the `try` could be narrower, which held every element of a `word/document.xml` at
+        # once — a corpus document parses to hundreds of thousands — on top of the span list
+        # `duplicate_revision_ids` already materializes. Widening the `try` to cover the loop
+        # costs nothing and removes that. Do not hoist the loop back out.
+        #
+        # WHAT THE GUARD ACTUALLY CATCHES, stated exactly rather than implied: today it fires
+        # from `duplicate_revision_ids`, which calls `iter_spans` and then `wml_attr_prefix`
+        # -> `wml_prefix`, refusing a part that declares no WordprocessingML element —
+        # `tracked_parts` selects by part NAME and never by content, so such a part still
+        # arrives here. Iteration cannot raise once that call has returned: both functions
+        # parse the SAME bytes with `iter_spans`, so a DOCTYPE or malformed XML has already
+        # raised. Covering the loop is defence against those two drifting apart, not a live
+        # path — a comment claiming otherwise would be the "asserts a property the code no
+        # longer has" defect this codebase catches elsewhere.
+        try:
+            dupes = wml.duplicate_revision_ids(data)
+            if dupes:
+                out.append(f"{part}: revision w:id reused across marks: {dupes}")
+            for span, ancestors in wml._ancestor_chains(data):
+                if span.name == wml.T and any(a.name == wml.DEL for a in ancestors):
+                    out.append(
+                        f"{part}: <w:t> inside <w:del> at byte {span.start}; must be "
+                        "<w:delText>, or accepting the deletion keeps the text"
+                    )
+                if span.name in wml.REVISION_MARKS and any(
+                    a.name in wml.REVISION_MARKS for a in ancestors
+                ):
+                    out.append(
+                        f"{part}: nested revision marks at byte {span.start}; schema-legal "
+                        "and Word-unsupported (design §4.3)"
+                    )
+        except OoxmlLedgerError as exc:
+            # `tracked_parts` selects by part NAME, never by content, so a `word/document.xml`
+            # that is valid XML and not WordprocessingML still arrives here and reaches
+            # `wml_attr_prefix` -> `wml_prefix`, which refuses it. That is a real structural
+            # defect of the RESULT, and saying so is the honest answer. `replay_forward`
+            # already makes the mirror-image guarantee for the BASELINE.
+            out.append(f"{part}: cannot be read by the Word engine: {exc}")
     return out
 
 

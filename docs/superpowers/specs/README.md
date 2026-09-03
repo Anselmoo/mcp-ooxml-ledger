@@ -18,6 +18,8 @@ produced and silently invalidate every receipt in existence — so it does not g
 ## Current
 
 - **`ooxml-ledger-design.md`** — the design. Start here.
+- **`../plans/`** — execution plans, from 2026-09-02 on. See "Plans" below for why the
+  earlier ones are cited but absent.
 - **`receipt-format-v1.md`** — normative. The receipt JSON schema (`ooxml-ledger/1`).
 - **`canonicalization-v1.md`** — normative. How a document is reduced to a digest
   (`ooxml-canon/1`).
@@ -82,6 +84,30 @@ the day before, in `72c72fd` and `f33447b` (2026-08-28). The plan was stale befo
 committed, and nothing about its prose would have told a reader that; only a close-out
 annotation, added once someone checked, does.
 
+
+## Plans, and the `plans/` citations that do not resolve
+
+Plans live in `../plans/`. **Only plans from 2026-09-02 onward are in this repository.**
+Everything this directory cites as `plans/2026-08-*.md`, here and in
+`ooxml-ledger-design.md`, was pre-publication planning scratch, gitignored under
+`.superpowers/` and deliberately not published: the specs here are the durable record, and they
+say what the software must do without narrating how it came to do it.
+
+Those citations were kept rather than stripped, under exactly the rule the anchor section above
+states for dead shas: *delete a claim that cannot be checked, keep a fact whose evidence has
+merely moved out of reach, and never let the second masquerade as the first.* A sentence like
+"`plans/2026-08-29-editing-verbs.md` shipped `preview_edits` and `apply_edits`" is recording
+what shipped together and in what order, which stays true once the document is out of reach. A
+citation that instructs a reader to *go and read* one of them is the other kind, and those
+are corrected in place rather than annotated: the "no spec for `formats/pml.py`" gap below
+used to send the reader to `plans/2026-08-29-pptx-engine.md` and now says plainly that there
+is nowhere to send them, and `.superpowers/sdd/.gitignore` no longer un-ignores a FastMCP
+reference file it could not produce — those notes were retired into design §7.2, where every
+row re-runs as a test.
+
+This paragraph is the disclosure that makes the difference visible. Without it a reader meets
+a path that does not exist and cannot tell a deliberate historical citation from a broken link.
+
 ## Known gaps
 
 Named here so the absence is visible rather than implied — none of these exist yet, and this
@@ -91,8 +117,10 @@ list does not write them:
   (`canonicalization-v1.md`, `receipt-format-v1.md`) and the design doc's own architecture
   sections are written entirely in WordprocessingML terms. PresentationML's direct-only
   editing model, its lack of a visibility layer, and its mandatory §4.2 disclosure have no
-  normative or design-level treatment of their own — only the implementation plan
-  (`plans/2026-08-29-pptx-engine.md`) and the shipped code.
+  normative or design-level treatment of their own — only the shipped code. The
+  implementation plan that once carried it, `plans/2026-08-29-pptx-engine.md`, is
+  pre-publication scratch and is not in this repository (see "Plans" below), so this gap is
+  wider than it reads: there is nowhere to send a reader at all.
 - **No release/publishing plan.** `LICENSE`, the CI workflow, `CHANGELOG.md`, `README.md`,
   `.mcp.json`, `server.json` and `mcpb/` all shipped (`d920be3`, `2ba77e2`, `e933073`,
   `711258b`, `698f488`) with no prior planning artifact of the kind every other phase in

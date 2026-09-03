@@ -425,3 +425,44 @@ def test_commit_is_never_annotated_read_only(server):
     annotations = by_name["commit_document"].annotations
     assert annotations.read_only_hint is not True
     assert annotations.destructive_hint is True
+
+
+#: Valid XML, correctly namespaced, and not WordprocessingML. `wml.tracked_parts` selects by
+#: PART NAME and never by content, so this still reaches the Word engine.
+NOT_WORDPROCESSINGML = (
+    b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    b'<doc xmlns="urn:example:not-wordprocessingml"><p>text</p></doc>'
+)
+
+
+def replace_document_part_out_of_band(document):
+    """An out-of-band write that leaves a valid container the Word ENGINE cannot read.
+
+    `mutate_out_of_band` above injects a comment and keeps the part readable, which exercises
+    the accountability check. This one makes the part unreadable to `wml`, which is what
+    reaches the structural check — a different failure, one layer further on.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        pkg = Package.open(document, Path(tmp) / "pkg")
+        pkg.write("word/document.xml", NOT_WORDPROCESSINGML)
+        pkg.save(document)
+
+
+def test_a_result_part_the_word_engine_cannot_read_is_refused_with_a_readable_reason(
+    server, docx
+):
+    """The masked-refusal defect, from the client's side.
+
+    `mask_error_details=True` passes a `ToolError` message through verbatim and replaces
+    every other exception with a generic one. `gate.structural_problems` used to let the
+    engine's `EditRefused` escape — it is not a `ToolError`, `engine_errors` has already
+    closed by the time `gate()` is called, and `commit_document` catches `GateFailure`
+    alone — so the client received `Error calling tool 'commit_document'` and nothing else,
+    in the one path this server exists for.
+    """
+    sid = open_doc(server)
+    replace_document_part_out_of_band(docx)
+
+    message = refusal(server, "commit_document", {"session_id": sid})
+
+    assert "word/document.xml" in message, message
