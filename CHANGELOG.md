@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-13
 ### Changed
 
 - **The commit gate reads `DISCLOSURE_PREFIX` from `ledger.models`,** its owner and the module `verify` already uses, instead of the Word engine's re-export `wml.DISCLOSURE_PREFIX`. Same string object, so no behaviour change; `tests/test_import_graph.py` pins the source.

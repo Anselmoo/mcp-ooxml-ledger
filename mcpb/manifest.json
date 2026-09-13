@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "ooxml-ledger",
   "display_name": "OOXML Ledger",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Edit Office documents and prove no edit went unrecorded",
   "long_description": "Edits .docx, .pptx, and .xlsx files and enforces an accountability gate: `commit_document` refuses to seal a receipt if the document changed in a way no recorded operation explains, unless a human explicitly forces and thereby records the override. `verify` and `digest` are stateless, so the same check that guards an interactive edit also runs in CI. Fourteen tools cover the full loop: open a document, inspect its structure and paragraph text, preview and apply text/paragraph edits, commit with a sealed receipt, and independently verify or export that receipt later. Every path argument is resolved inside the configured document root and refused outside it.",
   "author": {

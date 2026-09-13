@@ -1,6 +1,6 @@
 [project]
 name = "mcp-ooxml-ledger"
-version = "0.2.1"
+version = "0.3.0"
 description = "Edit Office documents and prove no edit went unrecorded"
 requires-python = ">=3.13"
 # PyPI-facing metadata: absent, a first release would ship a project page with no rendered
