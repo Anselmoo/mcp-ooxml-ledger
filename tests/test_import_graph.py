@@ -308,3 +308,34 @@ def test_opc_is_a_package_at_its_unchanged_import_path():
 
     assert pathlib.Path(opc.__file__).name == "__init__.py"
     assert pathlib.Path(opc.__file__).parent.name == "opc"
+
+
+# -- the disclosure marker has one owner ------------------------------------------------------
+#
+# `DISCLOSURE_PREFIX` is a receipt-format marker defined in `ledger/models.py`; `verify` and
+# the format engines import it from there. `gate` used to read `wml.DISCLOSURE_PREFIX`, the
+# Word engine's re-export, so the commit gate's disclosure check depended on a format engine
+# for a ledger constant. The objects are identical today, which is exactly why only a static
+# check can keep it that way.
+
+
+def test_the_gate_takes_the_disclosure_marker_from_the_ledger_model():
+    tree = ast.parse((ENGINE_ROOT / "gate.py").read_text(encoding="utf-8"))
+    via_engine = [
+        f"line {node.lineno}: {ast.unparse(node)}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "DISCLOSURE_PREFIX"
+        and isinstance(node.value, ast.Name)
+        and node.value.id in {"wml", "pml"}
+    ]
+    from_model = [
+        node.lineno
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.level == 1
+        and node.module == "ledger.models"
+        and any(a.name == "DISCLOSURE_PREFIX" for a in node.names)
+    ]
+    assert via_engine == [], via_engine
+    assert from_model, "gate.py should import DISCLOSURE_PREFIX from .ledger.models"

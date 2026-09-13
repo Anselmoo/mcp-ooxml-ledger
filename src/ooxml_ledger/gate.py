@@ -35,7 +35,7 @@ from .canon import canon, manifest
 from .core.errors import GateFailure, OoxmlLedgerError
 from .core.pkg import Package
 from .formats import pml, wml
-from .ledger.models import Attestation
+from .ledger.models import DISCLOSURE_PREFIX, Attestation
 from .outline import kind_of
 
 _WORD_KINDS = (".docx", ".dotx")
@@ -389,7 +389,7 @@ def _owes_disclosure(op: Mapping[str, Any]) -> bool:
 
 
 def _discloses(op: Mapping[str, Any]) -> bool:
-    return wml.DISCLOSURE_PREFIX in (op.get("note") or "")
+    return DISCLOSURE_PREFIX in (op.get("note") or "")
 
 
 def _direct_edits_owing_disclosure(operations: Sequence[Any]) -> list[str]:
