@@ -629,3 +629,22 @@ def test_an_expired_session_is_refused_rather_than_served(server, docx):
     meta["expires"] = "2020-01-01T00:00:00Z"
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
     assert "expired" in refusal(server, "describe_structure", {"session_id": sid})
+
+
+def test_reopening_with_a_case_variant_path_resumes_the_same_session(server, docx):
+    """PR #2 review: `Boundary` accepts a case-variant path on a case-insensitive filesystem
+    (APFS, NTFS), but `_resumable` compared `meta.document` as a string, so reopening
+    `MS.DOCX` missed the live session for `ms.docx` and forked a second baseline and journal
+    for the same file. Documents are matched by filesystem identity."""
+    variant = docx.parent / docx.name.upper()
+    if not variant.exists():
+        pytest.skip(
+            "case-sensitive filesystem: the variant is a different, absent file"
+        )
+
+    first = open_doc(server)
+    again = open_doc(server, name=variant.name)
+
+    assert again["resumed"] is True, again
+    assert again["session_id"] == first["session_id"]
+    assert len(list(sessions_dir_for(docx).glob("[0-9a-f]" * 32))) == 1

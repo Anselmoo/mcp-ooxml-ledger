@@ -178,6 +178,17 @@ def document_open_lock(sessions: Path) -> Generator[None]:
     busy document-open is a race between two callers who do not yet know about each other, and
     the section it guards is short enough that a brief wait resolves it — see
     `OPEN_LOCK_TIMEOUT_SECONDS`.
+
+    The writing verbs take the SAME lock (PR #2 review): `apply_edits` and `_write_one` (behind
+    `delete_paragraph` and `insert_paragraph`) hold it across the drift check, the document
+    replace and the journal append. Otherwise another writer could replace the document
+    between a session's drift check and its write, and an `open_document` scan could observe
+    the document already replaced but its journal line not yet appended, skip that session as
+    mismatched, and fork a second one over an unjournalled edit.
+
+    Lock order is always the session lock (non-blocking) first, then this one (bounded wait).
+    `open_document` holds this lock but never waits on a session lock (`sweep` only probes
+    them non-blockingly), so the order cannot deadlock.
     """
     path = sessions / OPEN_LOCK_FILENAME
     try:
@@ -196,8 +207,8 @@ def document_open_lock(sessions: Path) -> Generator[None]:
                 if time.monotonic() >= deadline:
                     refuse(
                         f"timed out after {OPEN_LOCK_TIMEOUT_SECONDS:.0f}s waiting for "
-                        "another open_document call on this document to finish. Nothing was "
-                        "opened. Retry."
+                        "another open or write of this document to finish. Nothing was opened "
+                        "or written. Retry."
                     )
                 time.sleep(0.02)
         try:

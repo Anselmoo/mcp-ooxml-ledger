@@ -117,7 +117,14 @@ from .deps import (
 from .errors import engine_errors
 from .guards import checked_part, checked_session_id, refuse
 from .journal import WorkingJournal
-from .session import Session, locked, projected_digest, utc_now
+from .session import (
+    Session,
+    document_open_lock,
+    locked,
+    projected_digest,
+    sessions_dir_for,
+    utc_now,
+)
 
 PREVIEW_ANNOTATIONS = ToolAnnotations(
     read_only_hint=True, idempotent_hint=True, open_world_hint=False
@@ -946,7 +953,14 @@ def _write_one(
     document = _live_document(session)
     _journal_ready(session)
 
-    with _scratch(session.root, "apply") as scratch:
+    # PR #2 review: the per-DOCUMENT lock spans the drift check, the write and the journal
+    # append, so no other writer can replace the document between the check and this write,
+    # and `open_document` (which scans under the same lock) can never observe the document
+    # replaced but its journal line not yet appended. See `document_open_lock`.
+    with (
+        document_open_lock(sessions_dir_for(document)),
+        _scratch(session.root, "apply") as scratch,
+    ):
         with engine_errors(what):
             pkg = Package.open(document, scratch / "pkg")
             _refuse_if_document_drifted(session, pkg)
@@ -1031,6 +1045,10 @@ def register(server: FastMCP, deps: Deps) -> None:
             engine_errors(f"previewing edits to {session.meta.name}"),
         ):
             pkg = Package.open(document, scratch / "pkg")
+            # The same drift precheck `apply_edits` runs (PR #2 review): without it a stale
+            # session previewed green for a batch the apply refuses, which is exactly the
+            # disagreement this tool's description says cannot happen.
+            _refuse_if_document_drifted(session, pkg)
             _checked_edits(pkg, edits)
             batch = _run_batch(pkg, edits, author=author, at=utc_now(), mode=mode)
 
@@ -1069,7 +1087,11 @@ def register(server: FastMCP, deps: Deps) -> None:
             document = _live_document(session)
             _journal_ready(session)
 
-            with _scratch(session.root, "apply") as scratch:
+            # Same per-document lock as `_write_one`, for the same two races.
+            with (
+                document_open_lock(sessions_dir_for(document)),
+                _scratch(session.root, "apply") as scratch,
+            ):
                 with engine_errors(f"editing {session.meta.name}"):
                     pkg = Package.open(document, scratch / "pkg")
                     _refuse_if_document_drifted(session, pkg)

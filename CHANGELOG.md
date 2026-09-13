@@ -71,6 +71,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Edits hold the per-document lock across the drift check, the write and the journal append.**
+  Another writer could replace the document between a session's drift check and its write, and
+  `open_document` could observe a replaced document before its journal line landed and fork a
+  session over the unjournalled edit. `preview_edits` now runs the same drift precheck as
+  `apply_edits`, so the two cannot disagree on a stale session.
+- **Reopening a document with a case-variant path resumes its session** on case-insensitive
+  filesystems instead of forking a second baseline and journal (documents are matched by identity).
+- **`ooxml_ledger.ledger.store` imports without `fcntl`**, so the standalone `verify` path works on
+  platforms without it; only darwin's `F_FULLFSYNC` upgrade needs it.
+- **An unreadable explicit `original=` is reported as the supplied original**, not as the stored
+  baseline.
 - **A server restart no longer turns an uncommitted edit into the next session's baseline.**
   `open_document` resumes the session whose journal, replayed onto its frozen baseline,
   reproduces the live document; if a same-document session holds operations the live file no
@@ -135,7 +146,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dest=".OOXML-LEDGER/receipts/..."` passed the case-sensitive store guard and replaced a real
   receipt. The guard now compares case-insensitively and by directory identity.
 - **Zip-bomb limits on package open.** Declared sizes are checked before `testzip`/extract:
-  100 MiB total, 50 MiB per entry, 200x per-entry compression ratio. A 204 KB archive used to
+  100 MiB total, 50 MiB per entry, 200x per-entry compression ratio, and at most 10,000 entries (millions of zero-byte
+  entries used to pass every byte cap). A 204 KB archive used to
   expand to 200 MB on disk.
 
 ## [0.2.1] - 2026-08-31

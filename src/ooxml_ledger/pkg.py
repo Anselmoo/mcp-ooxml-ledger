@@ -9,6 +9,7 @@ monkeypatch) does not change what the kernel itself sees -- patch the core modul
 from .core.pkg import (
     CONTAINER_MAIN_PART,
     MAX_COMPRESSION_RATIO,
+    MAX_ENTRY_COUNT,
     MAX_ENTRY_UNCOMPRESSED_SIZE,
     MAX_TOTAL_UNCOMPRESSED_SIZE,
     Package,
@@ -17,6 +18,7 @@ from .core.pkg import (
 __all__ = [
     "CONTAINER_MAIN_PART",
     "MAX_COMPRESSION_RATIO",
+    "MAX_ENTRY_COUNT",
     "MAX_ENTRY_UNCOMPRESSED_SIZE",
     "MAX_TOTAL_UNCOMPRESSED_SIZE",
     "Package",

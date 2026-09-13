@@ -56,6 +56,14 @@ MAX_TOTAL_UNCOMPRESSED_SIZE = 100 * 1024 * 1024  # 100 MiB
 MAX_ENTRY_UNCOMPRESSED_SIZE = 50 * 1024 * 1024  # 50 MiB
 MAX_COMPRESSION_RATIO = 200  # uncompressed / compressed, per entry
 
+# Entry-count cap (PR #2 review). The byte caps above say nothing about HOW MANY entries an
+# archive holds: millions of zero-byte entries pass all three while `testzip()`, `extract()`
+# and `parts()` still walk every one, exhausting inodes and CPU. Measured 2026-09-13: the
+# largest corpus archive holds 48 entries (pptx-producer.pptx), and a deck of several hundred
+# slides with notes and media stays in the low thousands. Checked from the central directory
+# before anything is decompressed or written.
+MAX_ENTRY_COUNT = 10_000
+
 
 class Package(BaseModel):
     """An unpacked OOXML container rooted at `root`."""
@@ -85,6 +93,12 @@ class Package(BaseModel):
             zf = zipfile.ZipFile(path)
             with zf:
                 infolist = zf.infolist()
+                if len(infolist) > MAX_ENTRY_COUNT:
+                    raise PackageError(
+                        f"{path.name}: archive declares {len(infolist)} entries, over the "
+                        f"{MAX_ENTRY_COUNT}-entry cap. Refusing as a likely zip bomb before "
+                        "decompressing or extracting any of them."
+                    )
                 total_size = 0
                 for info in infolist:
                     total_size += info.file_size

@@ -91,6 +91,22 @@ class CloseReport(BaseModel):
     removed_directory: str
 
 
+def _same_document(recorded: str, document: Path) -> bool:
+    """Whether `recorded` (a session's `meta.document`) names the same file as `document`.
+
+    PR #2 review: `Boundary` accepts a case-variant path on a case-insensitive filesystem (APFS,
+    NTFS) and hands it back with the caller's casing, so a string comparison missed the live
+    session and forked a second baseline and journal for the same file. Filesystem identity is
+    the comparison; when either side cannot be stat'ed, only exact string equality counts.
+    """
+    if recorded == str(document):
+        return True
+    try:
+        return Path(recorded).samefile(document)
+    except OSError:
+        return False
+
+
 def _resumable(sessions: Path, document: Path, digest: str, ttl: int) -> Path | None:
     """A live session for this exact document whose recorded state still explains it, or None.
 
@@ -144,7 +160,7 @@ def _resumable(sessions: Path, document: Path, digest: str, ttl: int) -> Path | 
         meta = read_meta(child)
         if meta is None:
             continue
-        if meta.document != str(document):
+        if not _same_document(meta.document, document):
             continue
         package = Package(
             root=child / "pkg", kind="." + meta.kind, source=Path(meta.document)

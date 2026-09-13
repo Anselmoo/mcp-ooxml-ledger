@@ -212,7 +212,12 @@ def verify(
             # were not there.
             tiers["T3"] = False
             baseline_checked = False
-            reasons.append(f"T3 failed: the stored baseline could not be read: {exc}")
+            source = (
+                "the supplied original"
+                if original is not None
+                else "the stored baseline"
+            )
+            reasons.append(f"T3 failed: {source} could not be read: {exc}")
         else:
             tiers["T3"] = original_digest == receipt.baseline.digest
             baseline_checked = tiers["T3"]

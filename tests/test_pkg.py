@@ -315,3 +315,31 @@ def test_encrypted_entry_is_refused_and_cleans_the_workdir(tmp_path):
     with pytest.raises(PackageError, match="password-protected|corrupt"):
         Package.open(p, work)
     assert not work.exists()
+
+
+def test_an_archive_with_too_many_entries_is_refused_before_extraction(tmp_path):
+    """PR #2 review: the size and ratio caps bound decompressed BYTES, not the NUMBER of
+    entries. Millions of zero-byte entries pass every byte cap while `testzip()`,
+    `extract()` and `parts()` still walk each one (inode and CPU exhaustion). The count is
+    checked from the central directory before anything is decompressed or written."""
+    from ooxml_ledger.pkg import MAX_ENTRY_COUNT
+
+    p = tmp_path / "many.docx"
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("word/document.xml", "<w:document/>")
+        for i in range(MAX_ENTRY_COUNT):
+            z.writestr(f"word/media/e{i}.bin", b"")
+
+    work = tmp_path / "w"
+    with pytest.raises(PackageError, match="entries"):
+        Package.open(p, work)
+    assert not work.exists()
+
+
+def test_every_corpus_archive_sits_far_below_the_entry_cap():
+    """Guard against a cap that refuses real documents: two orders of magnitude of headroom."""
+    from ooxml_ledger.pkg import MAX_ENTRY_COUNT
+
+    largest = max(len(zipfile.ZipFile(p).infolist()) for p in ALL)
+    assert largest * 100 <= MAX_ENTRY_COUNT, (largest, MAX_ENTRY_COUNT)

@@ -1,4 +1,4 @@
-"""Compatibility shim: Shared constants now lives in `ooxml_ledger.core.constants`.
+"""Compatibility shim: Shared constants now live in `ooxml_ledger.core.constants`.
 
 Kept so external callers importing the old path keep working. Nothing inside this package
 may import through it (`tests/test_import_graph.py` pins that). Every name is the SAME object

@@ -466,3 +466,20 @@ def test_verify_does_not_import_the_format_engines():
         for alias in node.names
     }
     assert not any("formats" in name for name in imported), sorted(imported)
+
+
+def test_an_unreadable_explicit_original_is_named_as_the_supplied_original(tmp_path):
+    """PR #2 review: when the caller passes `original=`, it takes precedence over the stored
+    baseline, so a read failure must name THAT file, not send the operator to the store."""
+    doc, receipt = _prepare(tmp_path)
+    broken = tmp_path / "broken-original.docx"
+    broken.write_bytes(b"not a zip archive")
+
+    v = verify(doc, receipt=receipt, original=broken)
+
+    assert v.tiers["T3"] is False
+    assert v.baseline_checked is False
+    t3 = [r for r in v.reasons if r.startswith("T3 failed")]
+    assert t3, v.reasons
+    assert "supplied original" in t3[0], t3
+    assert "stored baseline" not in t3[0], t3

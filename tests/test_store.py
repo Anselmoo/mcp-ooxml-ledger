@@ -210,3 +210,32 @@ def test_publish_fsyncs_the_file_before_replace_and_the_directory_after(
     assert calls.count("file") >= 1
     assert calls.count("dir") >= 1
     assert calls.index("file") < calls.index("dir")
+
+
+def test_the_standalone_verify_path_imports_and_fsyncs_without_fcntl(tmp_path):
+    """PR #2 review: `fcntl` exists only on POSIX, but `ledger.store` sits on the standalone
+    CLI `verify` path and the project declares `Operating System :: OS Independent`. Only
+    darwin's `F_FULLFSYNC` needs it, so the store must import, and its fsync helpers must
+    still work, when `fcntl` cannot be imported at all (as on Windows)."""
+    import subprocess
+    import sys
+
+    target = tmp_path / "durable.bin"
+    code = (
+        "import sys, pathlib\n"
+        "sys.modules['fcntl'] = None  # makes `import fcntl` raise ImportError\n"
+        "import ooxml_ledger.ledger.store as store\n"
+        "import ooxml_ledger.verify\n"
+        "import ooxml_ledger.cli\n"
+        f"p = pathlib.Path({str(target)!r})\n"
+        "with p.open('wb') as fh:\n"
+        "    fh.write(b'x')\n"
+        "    store._fsync_file(fh)\n"
+        "store._fsync_dir(p.parent)\n"
+        "print('ok')\n"
+    )
+    out = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "ok"

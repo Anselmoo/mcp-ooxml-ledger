@@ -545,3 +545,92 @@ def test_a_truncated_journal_refuses_in_both_preview_and_apply(server, docx):
     assert previewed == applied, (previewed, applied)
     assert "truncated line" in previewed, previewed
     assert "Nothing was written" in previewed, previewed
+
+
+# --- the per-document lock spans check, write and record (PR #2 review) --------------------
+
+
+def _document_lock_is_held(document) -> bool:
+    """Probe the per-document `.open.lock` from a SEPARATE open file description, which is
+    how `flock` contends across threads and processes alike."""
+    import fcntl
+
+    path = sessions_dir_for(document) / ".open.lock"
+    with path.open("a+") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+
+
+def test_the_document_lock_probe_can_actually_detect_a_held_lock(server, docx):
+    """Guard the guard: a probe that always said 'free' would make the test below vacuous."""
+    from ooxml_ledger.mcp.session import document_open_lock
+
+    session_for(server)
+    with document_open_lock(sessions_dir_for(docx)):
+        assert _document_lock_is_held(docx)
+    assert not _document_lock_is_held(docx)
+
+
+@pytest.mark.parametrize(
+    ("tool", "params"),
+    [
+        ("apply_edits", apply_params),
+        ("delete_paragraph", delete_params),
+        ("insert_paragraph", insert_params),
+    ],
+)
+def test_a_verb_holds_the_document_lock_from_the_drift_check_through_the_journal_append(
+    server, docx, monkeypatch, tool, params
+):
+    """PR #2 review, two races with one cause. The drift check and the document replace were
+    covered only by the per-SESSION lock, so (a) another session or process could replace the
+    document between the check and this call's write, and (b) `open_document`, which scans
+    under the per-DOCUMENT lock, could observe the document already replaced but the journal
+    line not yet appended, skip this session as mismatched, and fork a second session whose
+    baseline absorbs the unjournalled edit. Both close when every writing verb holds the SAME
+    per-document lock across the check, the write and the record."""
+    from ooxml_ledger.mcp import tools_edit
+    from ooxml_ledger.mcp.journal import WorkingJournal
+
+    sid = session_for(server)
+    probes = {}
+    real_check = tools_edit._refuse_if_document_drifted
+    real_append = WorkingJournal.append_all
+
+    def check(session, live):
+        probes["drift_check"] = _document_lock_is_held(docx)
+        return real_check(session, live)
+
+    def append_all(self, operations):
+        probes["journal_append"] = _document_lock_is_held(docx)
+        return real_append(self, operations)
+
+    monkeypatch.setattr(tools_edit, "_refuse_if_document_drifted", check)
+    monkeypatch.setattr(WorkingJournal, "append_all", append_all)
+
+    call(server, tool, params(sid))
+
+    assert probes == {"drift_check": True, "journal_append": True}, probes
+    assert not _document_lock_is_held(docx), (
+        "the lock must be released when the call returns"
+    )
+
+
+def test_preview_refuses_a_drifted_session_with_the_same_sentence_as_apply(
+    server, docx, pandoc_docx
+):
+    """PR #2 review: `apply_edits` refuses a stale session, but `preview_edits` did not run
+    the same precheck, so it could report a green preview for a batch the apply refuses,
+    contradicting the preview contract that the two cannot disagree."""
+    sid = session_for(server)
+    docx.write_bytes(pandoc_docx.read_bytes())
+
+    previewed = refusal(server, "preview_edits", apply_params(sid))
+    applied = refusal(server, "apply_edits", apply_params(sid))
+
+    assert sid in previewed, previewed
+    assert previewed == applied, (previewed, applied)

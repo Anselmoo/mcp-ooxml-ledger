@@ -8,7 +8,6 @@ would orphan the receipt at that moment.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import re
@@ -40,12 +39,20 @@ def _fsync_file(fh) -> None:
     """
     fh.flush()
     os.fsync(fh.fileno())
-    if sys.platform == "darwin" and hasattr(fcntl, "F_FULLFSYNC"):
-        # Not every darwin filesystem honours F_FULLFSYNC (e.g. some network mounts); the
-        # plain fsync above already ran, so this is a best-effort upgrade, not the only
-        # line of defense.
-        with contextlib.suppress(OSError):
-            fcntl.fcntl(fh.fileno(), fcntl.F_FULLFSYNC)
+    if sys.platform == "darwin":
+        # Imported HERE, not at module level: `fcntl` exists only on POSIX, and this module
+        # sits on the standalone `ooxml-ledger verify` path, which must import on every
+        # platform the project declares (PR #2 review).
+        try:
+            import fcntl
+        except ImportError:
+            return
+        if hasattr(fcntl, "F_FULLFSYNC"):
+            # Not every darwin filesystem honours F_FULLFSYNC (e.g. some network mounts);
+            # the plain fsync above already ran, so this is a best-effort upgrade, not the
+            # only line of defense.
+            with contextlib.suppress(OSError):
+                fcntl.fcntl(fh.fileno(), fcntl.F_FULLFSYNC)
 
 
 def _fsync_dir(directory: Path) -> None:
