@@ -767,3 +767,21 @@ def test_the_default_root_is_the_working_directory(tmp_path, monkeypatch):
     monkeypatch.delenv("OOXML_LEDGER_ROOTS", raising=False)
     monkeypatch.chdir(tmp_path)
     assert Boundary.from_roots(None).roots == (pathlib.Path(tmp_path).resolve(),)
+
+
+def test_within_roots_accepts_a_prefix_the_filesystem_reports_as_the_root(
+    tmp_path, monkeypatch
+):
+    """The identity fallback itself, platform-independently: emulate a case-folding
+    filesystem by making `_same_directory` compare case-insensitively. A path under a
+    case-variant spelling of the root is accepted; a genuinely different directory is not."""
+    from ooxml_ledger.mcp import guards
+
+    root = (tmp_path / "Root").resolve()
+    root.mkdir()
+    boundary = guards.Boundary.from_roots([root])
+    monkeypatch.setattr(
+        guards, "_same_directory", lambda a, b: str(a).lower() == str(b).lower()
+    )
+    assert boundary.within_roots(pathlib.Path(str(root).upper()) / "doc.docx")
+    assert not boundary.within_roots(tmp_path.resolve() / "Other" / "doc.docx")

@@ -768,3 +768,45 @@ def test_taking_the_lock_on_a_removed_session_refuses_and_does_not_recreate_it(
     ):
         pass
     assert not root.exists()
+
+
+# --- the per-document lock's refusal paths ------------------------------------------------
+
+
+def test_the_document_lock_refuses_by_name_when_its_file_cannot_be_opened(tmp_path):
+    from ooxml_ledger.mcp.session import document_open_lock
+
+    with (
+        pytest.raises(ToolError, match="could not open the per-document lock"),
+        document_open_lock(tmp_path / "missing" / "sessions"),
+    ):
+        pass
+
+
+def test_the_document_lock_refuses_by_name_after_its_bounded_wait(
+    tmp_path, monkeypatch
+):
+    import fcntl
+
+    from ooxml_ledger.mcp import session as session_mod
+
+    monkeypatch.setattr(session_mod, "OPEN_LOCK_TIMEOUT_SECONDS", 0.05)
+    with (tmp_path / session_mod.OPEN_LOCK_FILENAME).open("a+") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with (
+                pytest.raises(ToolError, match="timed out"),
+                session_mod.document_open_lock(tmp_path),
+            ):
+                pass
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+
+def test_an_unreadable_journal_counts_as_unknown_not_empty(tmp_path):
+    from ooxml_ledger.mcp.session import _journal_op_count
+
+    (tmp_path / "journal.jsonl").write_text(
+        "this is not a journal line\n", encoding="utf-8"
+    )
+    assert _journal_op_count(tmp_path) is None

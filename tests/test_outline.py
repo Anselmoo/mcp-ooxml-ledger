@@ -696,3 +696,19 @@ def test_search_docx_default_page_visits_the_main_part_first(tmp_path):
 
     ordered = _content_priority_order(pkg, "docx", candidates)
     assert ordered[0] == "word/document.xml"
+
+
+def test_the_offset_mapper_falls_through_to_the_text_length():
+    """With a character whose lowercase form is longer, an offset past the lowered text maps
+    to the end of the original text rather than raising."""
+    from ooxml_ledger.outline import _original_offset
+
+    text = "\u0130x"  # "İx": lowercases to 3 chars
+    assert len(text.lower()) != len(text)
+    assert _original_offset(text, 99) == len(text)
+
+
+def test_docx_priority_order_is_unchanged_without_the_main_part(tmp_path):
+    pkg = _open("docx-producer.docx", tmp_path)
+    candidates = ["word/styles.xml", "word/footnotes.xml"]
+    assert _content_priority_order(pkg, "docx", candidates) == candidates

@@ -343,3 +343,45 @@ def test_every_corpus_archive_sits_far_below_the_entry_cap():
 
     largest = max(len(zipfile.ZipFile(p).infolist()) for p in ALL)
     assert largest * 100 <= MAX_ENTRY_COUNT, (largest, MAX_ENTRY_COUNT)
+
+
+# --- each zip cap refuses on its own (branch coverage for the F14 caps) ------------------
+
+
+def test_a_highly_compressible_entry_trips_the_ratio_cap_alone(tmp_path):
+    """1 MiB of zeros is far under both byte caps but compresses ~1000x."""
+    p = tmp_path / "ratio.docx"
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("word/document.xml", "<w:document/>")
+        z.writestr("word/media/zeros.bin", b"\x00" * (1024 * 1024))
+    with pytest.raises(PackageError, match="compression ratio"):
+        Package.open(p, tmp_path / "w")
+
+
+def test_many_stored_entries_trip_the_total_cap_alone(tmp_path, monkeypatch):
+    """Stored (ratio 1) entries each under the per-entry cap, but over the total cap.
+
+    Patched on `ooxml_ledger.core.pkg`: the shim re-exports the value, and rebinding the
+    shim's attribute would not change what `Package.open` reads."""
+    import ooxml_ledger.core.pkg as core_pkg
+
+    monkeypatch.setattr(core_pkg, "MAX_TOTAL_UNCOMPRESSED_SIZE", 64)
+    p = tmp_path / "total.docx"
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("word/document.xml", "<w:document/>")
+        z.writestr("word/a.bin", b"a" * 40)
+        z.writestr("word/b.bin", b"b" * 40)
+    with pytest.raises(PackageError, match="total uncompressed"):
+        Package.open(p, tmp_path / "w")
+
+
+def test_entries_that_collapse_on_disk_are_refused(tmp_path, monkeypatch):
+    """The belt-and-braces check after extraction: fewer parts on disk than archive entries
+    must refuse, or the digest would silently cover only the survivors."""
+    import ooxml_ledger.core.pkg as core_pkg
+
+    monkeypatch.setattr(core_pkg.Package, "parts", lambda self: [])
+    with pytest.raises(PackageError, match="collapsed"):
+        Package.open(ALL[0], tmp_path / "w")

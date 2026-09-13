@@ -239,3 +239,70 @@ def test_the_standalone_verify_path_imports_and_fsyncs_without_fcntl(tmp_path):
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "ok"
+
+
+# --- the darwin F_FULLFSYNC upgrade, exercised on every platform -------------------------
+
+
+class _FakeFcntl:
+    F_FULLFSYNC = 51
+
+    def __init__(self, raises=False):
+        self.calls = []
+        self.raises = raises
+
+    def fcntl(self, fd, op):
+        self.calls.append(op)
+        if self.raises:
+            raise OSError("not supported on this mount")
+
+
+def _fsync_once(tmp_path):
+    from ooxml_ledger.ledger import store
+
+    with (tmp_path / "f.bin").open("wb") as fh:
+        fh.write(b"x")
+        store._fsync_file(fh)
+
+
+def test_darwin_upgrades_to_full_fsync(tmp_path, monkeypatch):
+    import sys
+
+    fake = _FakeFcntl()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "fcntl", fake)
+    _fsync_once(tmp_path)
+    assert fake.calls == [_FakeFcntl.F_FULLFSYNC]
+
+
+def test_darwin_full_fsync_failure_is_best_effort(tmp_path, monkeypatch):
+    """Some darwin mounts reject F_FULLFSYNC; the plain fsync already ran, so it is ignored."""
+    import sys
+
+    fake = _FakeFcntl(raises=True)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "fcntl", fake)
+    _fsync_once(tmp_path)
+    assert fake.calls == [_FakeFcntl.F_FULLFSYNC]
+
+
+def test_darwin_without_the_full_fsync_flag_skips_it(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "fcntl", types.SimpleNamespace())
+    _fsync_once(tmp_path)
+
+
+def test_darwin_without_fcntl_still_fsyncs(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    synced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.setattr(os, "fsync", lambda fd: synced.append(fd) or real_fsync(fd))
+    _fsync_once(tmp_path)
+    assert len(synced) == 1

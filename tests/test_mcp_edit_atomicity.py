@@ -634,3 +634,24 @@ def test_preview_refuses_a_drifted_session_with_the_same_sentence_as_apply(
 
     assert sid in previewed, previewed
     assert previewed == applied, (previewed, applied)
+
+
+def test_a_session_whose_journal_cannot_be_replayed_refuses_before_writing(
+    server, docx, monkeypatch
+):
+    from ooxml_ledger.core.errors import OoxmlLedgerError
+    from ooxml_ledger.mcp import tools_edit
+
+    sid = session_for(server)
+    before = docx.read_bytes()
+
+    def broken(*args, **kwargs):
+        raise OoxmlLedgerError("replay engine refused")
+
+    monkeypatch.setattr(tools_edit, "projected_digest", broken)
+    message = refusal(server, "apply_edits", apply_params(sid))
+
+    assert "can no longer be replayed" in message, message
+    assert sid in message, message
+    assert docx.read_bytes() == before
+    assert journal_text(docx, sid) == ""

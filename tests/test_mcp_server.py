@@ -179,3 +179,17 @@ def test_a_missing_document_root_never_falls_back_to_the_cwd(monkeypatch, tmp_pa
     assert len(calls) == 1
     args, kwargs = calls[0]
     assert "roots" not in kwargs and len(args) == 0
+
+
+def test_main_runs_the_server_when_the_roots_are_valid(monkeypatch):
+    from ooxml_ledger.mcp import server as server_mod
+
+    ran = []
+
+    class _Fake:
+        def run(self):
+            ran.append(True)
+
+    monkeypatch.setattr(server_mod, "create_server", lambda read_only=False: _Fake())
+    server_mod.main()
+    assert ran == [True]

@@ -648,3 +648,44 @@ def test_reopening_with_a_case_variant_path_resumes_the_same_session(server, doc
     assert again["resumed"] is True, again
     assert again["session_id"] == first["session_id"]
     assert len(list(sessions_dir_for(docx).glob("[0-9a-f]" * 32))) == 1
+
+
+def test_same_document_is_false_when_neither_path_can_be_stated(tmp_path):
+    from ooxml_ledger.mcp.tools_session import _same_document
+
+    assert _same_document(str(tmp_path / "a.docx"), tmp_path / "a.docx") is True
+    assert (
+        _same_document(str(tmp_path / "gone-a.docx"), tmp_path / "gone-b.docx") is False
+    )
+
+
+def test_reopening_refuses_by_name_when_the_live_journal_cannot_be_read(server, docx):
+    sid = open_doc(server)["session_id"]
+    journal = sessions_dir_for(docx) / sid / "journal.jsonl"
+    journal.write_text("this is not a journal line\n", encoding="utf-8")
+
+    message = refusal(server, "open_document", {"document": "ms.docx"})
+
+    assert "working journal cannot be read" in message, message
+    assert sid in message, message
+    assert len(list(sessions_dir_for(docx).glob("[0-9a-f]" * 32))) == 1
+
+
+def test_a_candidate_whose_empty_journal_cannot_be_replayed_is_skipped(
+    server, docx, monkeypatch
+):
+    """An unreplayable candidate with NO recorded operations holds nothing to protect, so the
+    scan moves past it and the open creates a fresh session instead of refusing."""
+    from ooxml_ledger.core.errors import OoxmlLedgerError
+    from ooxml_ledger.mcp import tools_session
+
+    first = open_doc(server)
+
+    def broken(*args, **kwargs):
+        raise OoxmlLedgerError("replay engine refused")
+
+    monkeypatch.setattr(tools_session, "projected_digest", broken)
+    again = open_doc(server)
+
+    assert again["resumed"] is False, again
+    assert again["session_id"] != first["session_id"]
