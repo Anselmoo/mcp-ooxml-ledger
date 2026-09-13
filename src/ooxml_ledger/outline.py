@@ -41,15 +41,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from .canon.rules import is_default_content, is_excluded
-from .formats import wml
-from .opc import SLIDE_REL, WORKSHEET_REL, relationships
+from .formats import pml, wml
+from .opc import WORKSHEET_REL, SlideRef, _prefixed_rel_id, relationships, slides
 from .pkg import Package
 from .xml.locate import Span, attr_value, find_spans, iter_spans
 from .xml.text import decode_text
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
-P = "http://schemas.openxmlformats.org/presentationml/2006/main"
 S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 _KIND_BY_SUFFIX = {
@@ -107,13 +106,6 @@ class SheetRef(BaseModel):
     model_config = ConfigDict(frozen=True)
     name: str
     sheet_id: int | None
-    part: str | None
-
-
-class SlideRef(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    slide_id: int
-    index: int
     part: str | None
 
 
@@ -211,44 +203,6 @@ def _innermost(spans: Iterable[Span], name: str, inner: Span) -> Span | None:
     return best
 
 
-def _prefixed_rel_id(tag: bytes) -> str | None:
-    """The value of the `r:id`-style attribute, whatever prefix the producer bound.
-
-    `CT_SlideIdListEntry/@id` and `CT_Sheet/@sheetId` are UNQUALIFIED, so the only prefixed
-    attribute ending in `:id` on these elements is the relationship id.
-    """
-    from .xml.locate import iter_attrs
-
-    for name, value, _s, _e in iter_attrs(tag):
-        if name.endswith(b":id"):
-            return decode_text(value).text
-    return None
-
-
-def slides(pkg: Package) -> list[SlideRef]:
-    """Slides in `<p:sldIdLst>` order. Filesystem order is NEVER authoritative (design §4.6)."""
-    data = pkg.read("ppt/presentation.xml")
-    by_rel = {
-        r.id: r.part
-        for r in relationships(pkg, "ppt/presentation.xml")
-        if r.type == SLIDE_REL
-    }
-    out: list[SlideRef] = []
-    for index, span in enumerate(find_spans(data, f"{{{P}}}sldId")):
-        tag = data[span.start : span.tag_end]
-        raw_id = attr_value(tag, b"id")
-        if raw_id is None:
-            continue
-        out.append(
-            SlideRef(
-                slide_id=int(decode_text(raw_id).text),
-                index=index,
-                part=by_rel.get(_prefixed_rel_id(tag) or ""),
-            )
-        )
-    return out
-
-
 def sheets(pkg: Package) -> list[SheetRef]:
     data = pkg.read("xl/workbook.xml")
     by_rel = {
@@ -319,16 +273,8 @@ def _para_hashes(kind: str, part: str, data: bytes) -> dict[int, str]:
     each `w:p`, which produced a different value from `wml.Para.text_hash` under the same
     field name — so `paragraph_by_address` refused every address this module emitted,
     blaming the document for being stale.
-
-    `pml` is imported HERE, not at module level: `pml.py` does `from ..outline import
-    slides`, so an eager `from .formats import pml` above would execute before `slides` is
-    defined in this module's namespace and fail with an ImportError on the circular import.
-    By the time any caller reaches this function, `outline` has finished initialising and the
-    cycle resolves cleanly.
     """
     if kind == "pptx":
-        from .formats import pml
-
         return {
             para.span.start: para.text_hash for para in pml.iter_paragraphs(part, data)
         }

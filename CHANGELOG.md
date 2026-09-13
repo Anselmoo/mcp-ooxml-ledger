@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`slides()` and `SlideRef` moved from `outline` to `opc`, breaking the `outline` <-> `formats.pml` import cycle.** `pml.py` imported `outline.slides` while `outline.py` needed `formats.pml`, so `outline` had to defer that import into a function body. Slide enumeration is OPC relationship knowledge and `opc.py` already imported everything it needs, so no new dependency was added. `ooxml_ledger.outline.slides` and `.SlideRef` remain importable (re-exported, same objects); `tests/test_import_graph.py` pins that no format engine imports `outline` and that both modules import cleanly in either order. Pure move: `slides()` returns identical results on every pptx fixture.
+
 - **The `.mcpb` bundle now uses `server.type: "uv"` instead of vendoring dependencies.** The
   `python`-type bundle could not start in Claude Desktop on a stock macOS: the manifest ran a
   bare `python` (not on `PATH`), and the vendored native extensions were cp313-only while the

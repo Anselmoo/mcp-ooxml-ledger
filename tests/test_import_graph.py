@@ -138,3 +138,87 @@ def test_the_subprocess_probe_can_actually_detect_a_leak():
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     assert out.stdout.strip() == "fastmcp"
+
+
+# -- engine layering: formats must not reach back into outline ----------------------------
+#
+# `formats/pml.py` used to do `from ..outline import slides` while `outline.py` needed
+# `formats.pml`, so `outline` had to defer that import into a function body or fail with a
+# circular ImportError. `slides()` is OPC relationship knowledge and now lives in `opc.py`,
+# which `pml` may import freely. These pins keep the cycle from quietly coming back.
+
+
+def _imports_outline(source: str) -> list[int]:
+    """Line numbers of every import in *source* (a module inside `formats/`) that names
+    `ooxml_ledger.outline`, absolute or relative."""
+    hits = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            relative_hit = node.level == 2 and module.split(".")[0] == "outline"
+            relative_pkg_hit = (
+                node.level == 2
+                and not module
+                and any(a.name == "outline" for a in node.names)
+            )
+            absolute_hit = node.level == 0 and module.startswith("ooxml_ledger.outline")
+            if relative_hit or relative_pkg_hit or absolute_hit:
+                hits.append(node.lineno)
+        elif isinstance(node, ast.Import):
+            if any(a.name.startswith("ooxml_ledger.outline") for a in node.names):
+                hits.append(node.lineno)
+    return hits
+
+
+def test_the_outline_import_detector_can_actually_detect_one():
+    """Guard the guard: every spelling the detector must catch, and one it must not."""
+    assert _imports_outline("from ..outline import slides\n") == [1]
+    assert _imports_outline("from .. import outline\n") == [1]
+    assert _imports_outline("import ooxml_ledger.outline\n") == [1]
+    assert _imports_outline("def f():\n    from ..outline import slides\n") == [2]
+    assert _imports_outline("from ..opc import slides\n") == []
+
+
+def test_no_format_engine_imports_outline():
+    offenders = {
+        path.name: lines
+        for path in sorted((ENGINE_ROOT / "formats").glob("*.py"))
+        if (lines := _imports_outline(path.read_text(encoding="utf-8")))
+    }
+    assert offenders == {}, offenders
+
+
+def test_outline_imports_pml_at_module_level_not_inside_a_function():
+    tree = ast.parse((ENGINE_ROOT / "outline.py").read_text(encoding="utf-8"))
+
+    def names_pml(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 1
+            and node.module == "formats"
+            and any(a.name == "pml" for a in node.names)
+        )
+
+    top_level = [n for n in tree.body if names_pml(n)]
+    deferred = [n.lineno for n in ast.walk(tree) if names_pml(n) and n not in tree.body]
+    assert top_level, "outline.py should import formats.pml at module level"
+    assert deferred == [], f"deferred pml import(s) still present at lines {deferred}"
+
+
+def test_outline_and_pml_import_cleanly_in_either_order():
+    """Runtime, fresh interpreters: a cycle that only resolves in one import order is still a
+    cycle, and pytest's own process has long since imported both."""
+    for first, second in (
+        ("ooxml_ledger.formats.pml", "ooxml_ledger.outline"),
+        ("ooxml_ledger.outline", "ooxml_ledger.formats.pml"),
+    ):
+        code = f"import importlib\nimportlib.import_module({first!r})\nimportlib.import_module({second!r})\n"
+        subprocess.run([sys.executable, "-c", code], check=True, capture_output=True)  # noqa: S603
+
+
+def test_slides_and_slideref_stay_importable_from_outline():
+    """Re-export contract: `mcp/tools_read.py` and existing tests import these from outline."""
+    from ooxml_ledger import opc, outline
+
+    assert outline.slides is opc.slides
+    assert outline.SlideRef is opc.SlideRef
