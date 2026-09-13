@@ -27,10 +27,10 @@ import typer
 from pydantic import ValidationError
 
 from .canon import canon, manifest
-from .constants import ACCIDENT_EVIDENT_CAVEAT
-from .errors import OoxmlLedgerError
+from .core.constants import ACCIDENT_EVIDENT_CAVEAT
+from .core.errors import OoxmlLedgerError
+from .core.pkg import Package
 from .ledger.models import Receipt
-from .pkg import Package
 from .verify import verify as _verify
 
 app = typer.Typer(add_completion=False, help=__doc__, no_args_is_help=True)

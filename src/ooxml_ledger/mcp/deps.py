@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict
 
 from .. import __version__
-from ..constants import ACCIDENT_EVIDENT_CAVEAT
+from ..core.constants import ACCIDENT_EVIDENT_CAVEAT
 from ..gate import EDITABLE_KINDS
 from .guards import Boundary
 from .session import SessionRegistry

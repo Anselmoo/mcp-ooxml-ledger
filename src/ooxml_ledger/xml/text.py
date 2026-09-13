@@ -16,7 +16,7 @@ import re
 
 from pydantic import BaseModel, ConfigDict
 
-from ..errors import XmlSecurityError
+from ..core.errors import XmlSecurityError
 
 _NAMED: dict[bytes, str] = {
     b"amp": "&",

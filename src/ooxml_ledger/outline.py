@@ -41,9 +41,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from .canon.rules import is_default_content, is_excluded
+from .core.pkg import Package
 from .formats import pml, wml
 from .opc import WORKSHEET_REL, SlideRef, _prefixed_rel_id, relationships, slides
-from .pkg import Package
 from .xml.locate import Span, attr_value, find_spans, iter_spans
 from .xml.text import decode_text
 

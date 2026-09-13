@@ -47,10 +47,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ..errors import EditNotFound, EditRefused, OoxmlLedgerError
+from ..core.errors import EditNotFound, EditRefused, OoxmlLedgerError
+from ..core.pkg import Package
 from ..ledger.models import DISCLOSURE_PREFIX as _DISCLOSURE_PREFIX
 from ..opc import SLIDE_REL, relationships, rels_part_for, slides
-from ..pkg import Package
 from ..xml.locate import Span, attr_value, iter_spans
 from ..xml.splice import Splice, apply_splices
 from ..xml.text import decode_text, escape, require_xml_text

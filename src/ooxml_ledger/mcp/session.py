@@ -39,10 +39,10 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..canon import canon_of_manifest, manifest
-from ..errors import OoxmlLedgerError
+from ..core.errors import OoxmlLedgerError
+from ..core.pkg import Package
 from ..gate import replay_forward
 from ..ledger.store import STORE_DIRNAME
-from ..pkg import Package
 from .guards import MAX_TTL_SECONDS, SESSION_ID_RE, checked_session_id, refuse
 from .journal import WorkingJournal
 

@@ -63,7 +63,7 @@ def test_the_scan_actually_sees_files():
     assert (ENGINE_ROOT / "verify.py") in modules
     # Named explicitly because they are the two modules NOTHING in the engine imports — the
     # exact shape a shortlist-based probe would silently stop covering.
-    assert (ENGINE_ROOT / "opc.py") in modules
+    assert (ENGINE_ROOT / "opc" / "__init__.py") in modules
     assert (ENGINE_ROOT / "outline.py") in modules
 
 
@@ -222,3 +222,89 @@ def test_slides_and_slideref_stay_importable_from_outline():
 
     assert outline.slides is opc.slides
     assert outline.SlideRef is opc.SlideRef
+
+
+# -- engine layering: the kernel ----------------------------------------------------------
+#
+# `errors`, `constants` and `pkg` are the kernel every other stage leans on. Bundled into the
+# root package beside the orchestrators (`gate`, `verify`, `outline`), they made `canon` and
+# `xml` depend on the same stage that depends on them. They now live in `ooxml_ledger.core`,
+# which may import only itself. The old module paths stay importable as thin re-export shims
+# for external callers; nothing inside the package may reach the kernel through a shim.
+
+KERNEL = ("errors", "constants", "pkg")
+
+
+def _package_imports(path: pathlib.Path) -> list[tuple[int, str]]:
+    """(lineno, absolute dotted target) for every package-internal ImportFrom in *path*.
+    `from . import x` / `from .. import x` yield one entry per imported name."""
+    rel = path.relative_to(ENGINE_ROOT.parent).with_suffix("").parts
+    # A module and its package's __init__ both resolve `.` against the containing package.
+    package = list(rel[:-1])
+    out = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level == 0:
+            if (node.module or "").startswith("ooxml_ledger"):
+                out.append((node.lineno, node.module))
+            continue
+        base = package[: len(package) - (node.level - 1)]
+        if node.module:
+            out.append((node.lineno, ".".join([*base, node.module])))
+        else:
+            out.extend((node.lineno, ".".join([*base, a.name])) for a in node.names)
+    return out
+
+
+def test_the_package_import_resolver_resolves_relative_levels():
+    """Guard the guard: a resolver that mis-counts `..` would make both scans below vacuous."""
+    probe = ENGINE_ROOT / "formats" / "wml.py"
+    targets = {t for _, t in _package_imports(probe)}
+    assert any(t.startswith("ooxml_ledger.xml.") for t in targets), targets
+    assert not any(t.startswith("ooxml_ledger.formats.xml") for t in targets), targets
+
+
+def test_the_kernel_is_a_package_and_imports_only_itself():
+    core = ENGINE_ROOT / "core"
+    assert (core / "__init__.py").is_file()
+    for name in KERNEL:
+        assert (core / f"{name}.py").is_file(), name
+    offenders = [
+        f"{path.name}:{line} -> {target}"
+        for path in sorted(core.glob("*.py"))
+        for line, target in _package_imports(path)
+        if not target.startswith("ooxml_ledger.core")
+    ]
+    assert offenders == [], offenders
+
+
+def test_no_module_inside_the_package_imports_the_kernel_through_a_shim():
+    shims = {f"ooxml_ledger.{name}" for name in KERNEL}
+    offenders = [
+        f"{path.relative_to(ENGINE_ROOT)}:{line} -> {target}"
+        for path in sorted(ENGINE_ROOT.rglob("*.py"))
+        if path.parent != ENGINE_ROOT or path.stem not in KERNEL
+        for line, target in _package_imports(path)
+        if any(target == s or target.startswith(s + ".") for s in shims)
+    ]
+    assert offenders == [], offenders
+
+
+def test_the_shims_re_export_the_same_objects_as_the_kernel():
+    import importlib
+
+    for name in KERNEL:
+        shim = importlib.import_module(f"ooxml_ledger.{name}")
+        core = importlib.import_module(f"ooxml_ledger.core.{name}")
+        assert shim is not core, f"{name}: the shim should be its own thin module"
+        assert shim.__all__, f"{name}: a shim must declare what it re-exports"
+        for exported in shim.__all__:
+            assert getattr(shim, exported) is getattr(core, exported), (name, exported)
+
+
+def test_opc_is_a_package_at_its_unchanged_import_path():
+    from ooxml_ledger import opc
+
+    assert pathlib.Path(opc.__file__).name == "__init__.py"
+    assert pathlib.Path(opc.__file__).parent.name == "opc"

@@ -32,11 +32,11 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from .canon import canon, manifest
-from .errors import GateFailure, OoxmlLedgerError
+from .core.errors import GateFailure, OoxmlLedgerError
+from .core.pkg import Package
 from .formats import pml, wml
 from .ledger.models import Attestation
 from .outline import kind_of
-from .pkg import Package
 
 _WORD_KINDS = (".docx", ".dotx")
 #: Containers whose text operations belong to the PresentationML engine. Dispatching

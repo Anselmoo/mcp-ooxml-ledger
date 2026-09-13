@@ -1,37 +1,27 @@
-"""Exception hierarchy. Every failure this package raises derives from OoxmlLedgerError."""
+"""Compatibility shim: Exception hierarchy now lives in `ooxml_ledger.core.errors`.
 
+Kept so external callers importing the old path keep working. Nothing inside this package
+may import through it (`tests/test_import_graph.py` pins that). Every name is the SAME object
+as in `ooxml_ledger.core.errors`, but rebinding an attribute on THIS module (e.g. with
+monkeypatch) does not change what the kernel itself sees -- patch the core module instead.
+"""
 
-class OoxmlLedgerError(Exception):
-    """Base for every error raised by this package."""
+from .core.errors import (
+    EditNotFound,
+    EditRefused,
+    GateFailure,
+    OoxmlLedgerError,
+    PackageError,
+    VerificationError,
+    XmlSecurityError,
+)
 
-
-class PackageError(OoxmlLedgerError):
-    """A package could not be safely opened or written."""
-
-
-class XmlSecurityError(OoxmlLedgerError):
-    """A part carried markup that is unsafe to parse, such as a DOCTYPE."""
-
-
-class VerificationError(OoxmlLedgerError):
-    """A receipt could not be checked — malformed, or an unsupported version."""
-
-
-class EditRefused(OoxmlLedgerError):
-    """A guard refused an edit. The message always says which guard and why.
-
-    A refusal is a success of the design, not a failure of it: design §4.3 requires that
-    constructs outside the revision vocabulary be refused rather than silently mishandled.
-    """
-
-
-class EditNotFound(OoxmlLedgerError):
-    """The requested phrase does not exist in the addressed content."""
-
-
-class GateFailure(OoxmlLedgerError):
-    """The commit gate refused a write. Carries the divergences it found."""
-
-    def __init__(self, message: str, failures: list[str] | None = None) -> None:
-        super().__init__(message)
-        self.failures = failures or []
+__all__ = [
+    "EditNotFound",
+    "EditRefused",
+    "GateFailure",
+    "OoxmlLedgerError",
+    "PackageError",
+    "VerificationError",
+    "XmlSecurityError",
+]

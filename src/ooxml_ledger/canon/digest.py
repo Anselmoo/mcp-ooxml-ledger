@@ -11,7 +11,7 @@ import hashlib
 
 import rfc8785
 
-from ..pkg import Package
+from ..core.pkg import Package
 from .rules import is_default_content, is_excluded, normalize
 
 

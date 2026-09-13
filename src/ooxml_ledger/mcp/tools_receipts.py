@@ -34,9 +34,9 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel
 
 from ..canon import canon
+from ..core.pkg import Package
 from ..ledger.models import SCHEMA_VERSION
 from ..ledger.store import ReceiptStore
-from ..pkg import Package
 from .deps import (
     ACCIDENT_EVIDENT_CAVEAT,
     READ_ONLY_TAG,

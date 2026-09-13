@@ -14,7 +14,7 @@ from contextlib import contextmanager
 
 from fastmcp.exceptions import ToolError
 
-from ..errors import OoxmlLedgerError
+from ..core.errors import OoxmlLedgerError
 
 
 @contextmanager

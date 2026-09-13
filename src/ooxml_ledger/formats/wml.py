@@ -30,9 +30,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..errors import EditNotFound, EditRefused
+from ..core.errors import EditNotFound, EditRefused
+from ..core.pkg import Package
 from ..ledger.models import DISCLOSURE_PREFIX as _DISCLOSURE_PREFIX
-from ..pkg import Package
 from ..xml.locate import Span, attr_value, iter_attrs, iter_spans
 from ..xml.splice import Splice, apply_splices
 from ..xml.text import decode_text, escape, require_xml_text

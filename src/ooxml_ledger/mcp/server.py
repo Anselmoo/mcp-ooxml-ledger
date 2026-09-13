@@ -23,8 +23,8 @@ from pydantic import BaseModel
 
 from .. import __version__
 from ..canon.rules import CANON_VERSION
+from ..core.pkg import CONTAINER_MAIN_PART
 from ..ledger.models import SCHEMA_VERSION
-from ..pkg import CONTAINER_MAIN_PART
 from .deps import (
     ACCIDENT_EVIDENT_CAVEAT,
     EDITABLE_KINDS,

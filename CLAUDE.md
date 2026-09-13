@@ -39,7 +39,9 @@ outline.py                                                       read-only struc
 canon/rules.py, canon/digest.py                                 canonicalization -> digest
 ledger/models.py, chain.py, store.py                             receipt & chain model, storage
 xml/locate.py, splice.py, text.py                                byte-offset locate/splice, no re-serialize
-opc.py, pkg.py                                                   OPC container handling
+core/errors.py, constants.py, pkg.py                            kernel: imports only itself; OPC container I/O
+opc/                                                             OPC relationships, slide enumeration
+errors.py, constants.py, pkg.py (root)                          re-export shims for external callers only
 ```
 
 Two recording layers (design §1.1): **visibility** (Word `w:ins`/`w:del`, human-readable inside

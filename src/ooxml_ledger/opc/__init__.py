@@ -30,10 +30,10 @@ from posixpath import normpath
 
 from pydantic import BaseModel, ConfigDict
 
-from .errors import PackageError
-from .pkg import Package
-from .xml.locate import attr_value, find_spans, iter_attrs
-from .xml.text import decode_text
+from ..core.errors import PackageError
+from ..core.pkg import Package
+from ..xml.locate import attr_value, find_spans, iter_attrs
+from ..xml.text import decode_text
 
 RELS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _RELATIONSHIP = f"{{{RELS_NS}}}Relationship"

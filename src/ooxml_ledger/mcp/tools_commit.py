@@ -39,12 +39,12 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel
 
 from ..canon import CANON_VERSION, canon_of_manifest, manifest
-from ..errors import GateFailure
+from ..core.errors import GateFailure
+from ..core.pkg import Package
 from ..gate import attestation_for, gate
 from ..ledger.chain import first_break
 from ..ledger.models import SCHEMA_VERSION, Receipt
 from ..ledger.store import ReceiptStore
-from ..pkg import Package
 from .deps import (
     ACCIDENT_EVIDENT_CAVEAT,
     GATE_TAG,

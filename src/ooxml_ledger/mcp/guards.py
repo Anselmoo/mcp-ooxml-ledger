@@ -21,8 +21,8 @@ from typing import NoReturn
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
 
+from ..core.pkg import CONTAINER_MAIN_PART
 from ..ledger.store import STORE_DIRNAME
-from ..pkg import CONTAINER_MAIN_PART
 
 SESSION_ID_RE = re.compile(r"[0-9a-f]{32}")
 #: Anchored, like the two copies in `ledger/`. It was written unanchored here, with a

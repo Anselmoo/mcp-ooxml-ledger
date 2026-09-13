@@ -101,10 +101,10 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..canon import canon_of_manifest, manifest
-from ..errors import EditNotFound, EditRefused, OoxmlLedgerError
+from ..core.errors import EditNotFound, EditRefused, OoxmlLedgerError
+from ..core.pkg import Package
 from ..formats import pml, wml
 from ..outline import kind_of
-from ..pkg import Package
 from ..xml.text import require_xml_text
 from .deps import (
     EDITABLE_KINDS,

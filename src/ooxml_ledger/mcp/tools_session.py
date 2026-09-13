@@ -19,10 +19,10 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel
 
 from ..canon import CANON_VERSION, canon_of_manifest, manifest
-from ..errors import OoxmlLedgerError
+from ..core.errors import OoxmlLedgerError
+from ..core.pkg import Package
 from ..ledger.store import ReceiptStore
 from ..outline import kind_of
-from ..pkg import Package
 from .deps import SESSION_TAG, STATELESS_TAG, WRITES_TAG, Deps, ledger_meta
 from .errors import engine_errors
 from .guards import SESSION_ID_RE, checked_ttl, refuse

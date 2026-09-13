@@ -20,11 +20,11 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from .canon import canon, manifest
 from .canon.rules import CANON_VERSION
-from .errors import OoxmlLedgerError
+from .core.errors import OoxmlLedgerError
+from .core.pkg import Package
 from .ledger.chain import first_break
 from .ledger.models import DISCLOSURE_PREFIX, Receipt
 from .ledger.store import ReceiptStore
-from .pkg import Package
 
 Outcome = Literal["verified", "unknown", "failed"]
 
