@@ -113,14 +113,21 @@ Wire it into CI or a pre-commit hook and an unaccounted-for change fails the bui
 ## Desktop bundle (.mcpb)
 
 Every GitHub Release attaches a `.mcpb` file — a one-click Claude Desktop install: drag it onto
-the app and it runs with a vendored Python runtime, no `uv` or manual server config needed.
-`mcpb/manifest.json` exposes the document root and read-only toggle as install-time settings
-instead of environment variables; the tool list matches the stdio server's.
+the app and Desktop launches it with
+`uv run --directory <bundle> --frozen --no-dev ooxml-ledger-mcp`.
+Nothing is vendored — the bundle carries only `manifest.json`, `pyproject.toml`, `uv.lock`,
+`README.md`, `LICENSE` and `src/`. **The host needs `uv` on `PATH`**, and the first launch
+resolves the exact dependency versions `uv.lock` pins from PyPI, which needs network access;
+`--frozen` means it installs precisely the versions the test suite ran against, never a fresh
+resolve, and `--no-dev` keeps the dev group (pytest, ruff, pre-commit) out of the install. `mcpb/manifest.json` exposes the document root and read-only toggle as install-time
+settings instead of environment variables; the tool list matches the stdio server's.
 
 CI builds and smoke-tests the bundle on `macos-latest` only, and the manifest's
 `compatibility.platforms` declares `darwin` only — **the bundle is built and proven on
-macOS/arm64, nothing else.** It vendors native extensions (pydantic-core, cryptography, and
-more) as platform-specific wheels; installing it on Windows or Linux would fail to import them.
+macOS/arm64, nothing else.** Because nothing is vendored, `uv` itself picks a Python
+satisfying `requires-python = ">=3.13"` and installs the wheels `uv.lock` pins for the host's
+own platform — native ones such as pydantic-core and cryptography included. That part is not
+darwin-specific, but only the darwin launch path has actually been proven end-to-end here.
 
 ## Honest limits
 

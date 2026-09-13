@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
-"""Prove a built .mcpb bundle actually starts and serves its tools on this platform.
+"""Prove a built .mcpb bundle actually starts and serves exactly its declared tools.
 
-`mcpb/build.sh` vendors ooxml_ledger and its dependency tree into `server/lib` with
-`uv pip install --target`, which fetches wheels for the platform it runs on. fastmcp's
-tree carries native extensions (pydantic-core, cryptography, rpds-py, watchfiles), so a
-bundle is only proven on the platform that produced it -- which is why manifest.json
-claims exactly one platform. `npx @anthropic-ai/mcpb validate`, which build.sh already
-runs, checks the manifest's SHAPE and never imports a single vendored module.
+`mcpb/manifest.json` declares `server.type: "uv"`: Claude Desktop launches the bundle by
+substituting `${__dirname}` and `${user_config.*}` placeholders into `server.mcp_config` and
+running the result (`uv run --directory <bundle> --frozen ooxml-ledger-mcp`). Vendoring
+nothing means `npx @anthropic-ai/mcpb validate`, which `mcpb/build.sh` already runs, checks
+the manifest's SHAPE and never starts the server at all.
 
-This script closes that gap. It unpacks the bundle, launches server/main.py exactly the
-way manifest.json's `server.mcp_config` says a host will (PYTHONPATH pointed at
-server/lib, roots from OOXML_LEDGER_ROOTS), and speaks the MCP stdio handshake to it. It
-exits 0 only if the server answers `tools/list` with every tool name the manifest
-advertises -- so a bundle that packs cleanly but cannot import, cannot start, or serves a
-tool set that contradicts its own manifest fails here rather than on a user's machine.
+This script closes that gap end to end:
+
+  1. Unpacks the bundle.
+  2. Builds the launch command and environment FROM the manifest's own `mcp_config` --
+     the same substitution a real host performs -- rather than hardcoding a parallel launch
+     path that could quietly drift from what `manifest.json` actually says.
+  3. Speaks the MCP stdio handshake to the launched server and asks for `tools/list`.
+  4. Fails on BOTH a manifest tool the server didn't serve AND a served tool the manifest
+     doesn't declare (F05: the previous version only checked the first direction, so a
+     server/manifest contradiction in either direction passed silently).
+  5. Confirms the bundle ships `uv.lock` and that `--frozen` actually resolves the fastmcp
+     version `uv.lock` pins (F02: `build.sh` used to vendor a fresh, unlocked resolve that
+     silently shipped a different fastmcp than the lock and the test suite ran against).
 
 Usage:  python scripts/smoke_mcpb.py <dist-dir>
 """
@@ -23,17 +29,21 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 import zipfile
 from pathlib import Path
 
-# Generous: the first import of the vendored tree pays cold-start cost for
-# pydantic-core and cryptography on a fresh CI runner.
+# Generous: `uv run --frozen` on a cold cache resolves and installs the full dependency tree
+# (fastmcp, pydantic-core, cryptography, ...) before the server can answer anything.
 TIMEOUT_SECONDS = 120
 PROTOCOL_VERSION = "2025-06-18"
+
+_PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
 
 
 def _find_bundle(dist: Path) -> Path:
@@ -45,43 +55,67 @@ def _find_bundle(dist: Path) -> Path:
     return bundles[0]
 
 
-def _check_abi(lib_dir: Path) -> None:
-    """Refuse to smoke-test a vendored tree built for a different Python.
+def _substitute(value: str, substitutions: dict[str, str]) -> str:
+    """Replace every `${key}` in *value* using *substitutions*, refusing an unknown key.
 
-    A mismatch here is not a bundle defect -- it means this script was launched
-    under the wrong interpreter, and reporting it as a server failure would blame
-    the wrong thing.
+    Mirrors the subset of Desktop's own `mcp_config` template language this bundle uses:
+    `${__dirname}` and `${user_config.<name>}`.
     """
-    tags = {
-        part
-        for path in lib_dir.rglob("*.so")
-        for part in path.name.split(".")
-        if part.startswith("cpython-")
+
+    def repl(match: re.Match[str]) -> str:
+        key = match.group(1)
+        try:
+            return substitutions[key]
+        except KeyError:
+            raise KeyError(
+                f"mcp_config references ${{{key}}}, which no substitution was provided for"
+            ) from None
+
+    return _PLACEHOLDER_RE.sub(repl, value)
+
+
+def _resolve_mcp_config(
+    manifest: dict, *, dirname: Path, document_root: Path, read_only: bool
+) -> tuple[list[str], dict[str, str]]:
+    """Build the real argv and extra env vars a host would launch this bundle with.
+
+    Returns `(argv, env)` where `env` holds only the keys `mcp_config.env` declares
+    (substituted); the caller merges these onto its own environment rather than replacing
+    it, the same way a host's own process environment stays intact around the server.
+    """
+    mcp_config = manifest["server"]["mcp_config"]
+    substitutions = {
+        "__dirname": str(dirname),
+        "user_config.documentRoot": str(document_root),
+        "user_config.readOnly": "true" if read_only else "false",
     }
-    running = f"{sys.version_info.major}{sys.version_info.minor}"
+    argv = [_substitute(mcp_config["command"], substitutions)]
+    argv += [_substitute(arg, substitutions) for arg in mcp_config.get("args", [])]
+    env = {
+        key: _substitute(val, substitutions)
+        for key, val in mcp_config.get("env", {}).items()
+    }
+    return argv, env
 
-    # An extension tag is `cpython-<version><abiflags>-<platform>`, e.g.
-    # "cpython-313-darwin" or "cpython-313t-x86_64-linux-gnu". Only the VERSION
-    # field may be compared; the platform suffix is expected to be there.
-    #
-    # MEASURED 2026-08-30 (Actions run 33332176670): comparing the whole tag for
-    # equality against a bare "cpython-313" rejected every real bundle --
-    # "cpython-313-darwin" != "cpython-313" -- so the smoke test failed on a
-    # perfectly good bundle. A prefix test is wrong in the other direction: the
-    # free-threaded "cpython-313t" startswith-matches "cpython-313" while being a
-    # different ABI. Splitting the field out is the only comparison that rejects
-    # 313t and accepts 313-darwin, which is why it is done the long way here.
-    def version_field(tag: str) -> str:
-        parts = tag.split("-")
-        return parts[1] if len(parts) > 1 else ""
 
-    mismatched = sorted(tag for tag in tags if version_field(tag) != running)
-    if mismatched:
-        raise SystemExit(
-            f"vendored extensions are built for {mismatched} but this interpreter is "
-            f"cpython-{running}; run this script under the same Python minor version that "
-            f"mcpb/build.sh vendored with"
-        )
+def _diff_tool_sets(
+    expected: set[str], served: set[str]
+) -> tuple[list[str], list[str]]:
+    """Return `(missing, extra)`: manifest tools the server didn't serve, and served tools
+    the manifest doesn't declare. F05: the original only computed the first half, so a
+    server that serves an undeclared tool passed even though the docstring promised to fail
+    on any contradiction between the two.
+    """
+    return sorted(expected - served), sorted(served - expected)
+
+
+def _pinned_version(lock_text: str, package: str) -> str:
+    """The version *package* is pinned to in a `uv.lock` file's TOML text."""
+    data = tomllib.loads(lock_text)
+    for entry in data.get("package", []):
+        if entry.get("name") == package:
+            return entry["version"]
+    raise KeyError(f"{package!r} is not pinned in uv.lock")
 
 
 def _pump_lines(stream, sink: queue.Queue) -> None:
@@ -119,6 +153,47 @@ def _await_response(sink: queue.Queue, wanted_id: int, label: str) -> dict:
             return message
 
 
+def _check_locked_fastmcp_version(unpacked: Path) -> None:
+    """F02: `--frozen` must actually install the fastmcp version `uv.lock` pins, not a
+    fresh resolve. Runs the bundle's OWN `uv run --frozen` (no server involved) and compares
+    what it imports against what the lock says.
+    """
+    lock_path = unpacked / "uv.lock"
+    if not lock_path.is_file():
+        raise SystemExit(
+            f"{unpacked.name} has no uv.lock; server.type 'uv' needs one to install "
+            f"--frozen"
+        )
+    locked = _pinned_version(lock_path.read_text(encoding="utf-8"), "fastmcp")
+
+    result = subprocess.run(
+        [  # noqa: S607 -- `uv` resolved from PATH, on purpose.
+            "uv",
+            "run",
+            "--directory",
+            str(unpacked),
+            "--frozen",
+            "--no-dev",
+            "python",
+            "-c",
+            "import fastmcp; print(fastmcp.__version__)",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            f"'uv run --frozen' could not resolve the bundle's own lock: {result.stderr}"
+        )
+    resolved = result.stdout.strip()
+    if resolved != locked:
+        raise SystemExit(
+            f"server resolved fastmcp=={resolved} but uv.lock pins fastmcp=={locked}"
+        )
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         raise SystemExit("usage: smoke_mcpb.py <dist-dir>")
@@ -135,24 +210,20 @@ def main(argv: list[str]) -> int:
         if not expected:
             raise SystemExit("manifest.json advertises no tools; nothing to smoke-test")
 
-        lib_dir = unpacked / "server" / "lib"
-        if not lib_dir.is_dir():
-            raise SystemExit(
-                f"{bundle.name} has no server/lib; build.sh did not vendor"
-            )
-        _check_abi(lib_dir)
+        _check_locked_fastmcp_version(unpacked)
 
         documents = root / "documents"
         documents.mkdir()
 
+        launch_argv, launch_env = _resolve_mcp_config(
+            manifest, dirname=unpacked, document_root=documents, read_only=False
+        )
         env = dict(os.environ)
-        env["PYTHONPATH"] = str(lib_dir)
-        env["OOXML_LEDGER_ROOTS"] = str(documents)
-        env["OOXML_LEDGER_READ_ONLY"] = "false"
+        env.update(launch_env)
         env["PYTHONUNBUFFERED"] = "1"
 
         proc = subprocess.Popen(
-            [sys.executable, str(unpacked / "server" / "main.py")],
+            launch_argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -210,15 +281,18 @@ def main(argv: list[str]) -> int:
                 sys.stderr.write("".join(err_lines[-40:]))
 
         served = {tool["name"] for tool in listed["result"]["tools"]}
-        missing = sorted(expected - served)
-        if missing:
-            raise SystemExit(
-                f"bundle started but did not serve manifest tools: {missing}"
-            )
+        missing, extra = _diff_tool_sets(expected, served)
+        if missing or extra:
+            problems = []
+            if missing:
+                problems.append(f"manifest tools the server did not serve: {missing}")
+            if extra:
+                problems.append(f"served tools the manifest does not declare: {extra}")
+            raise SystemExit("; ".join(problems))
 
         print(
-            f"{bundle.name}: started under {sys.version.split()[0]}, "
-            f"served {len(served)} tools, all {len(expected)} manifest tools present"
+            f"{bundle.name}: launched via '{' '.join(launch_argv)}', "
+            f"served {len(served)} tools, exactly the {len(expected)} manifest declares"
         )
         return 0
 

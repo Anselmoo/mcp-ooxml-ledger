@@ -21,9 +21,9 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ValidationError
 
 from ..canon import CANON_VERSION, canon_of_manifest, manifest
+from ..core.pkg import Package
 from ..ledger.models import SCHEMA_VERSION, Receipt
 from ..outline import kind_of
-from ..pkg import Package
 from ..verify import verify as _verify
 from .deps import (
     ACCIDENT_EVIDENT_CAVEAT,

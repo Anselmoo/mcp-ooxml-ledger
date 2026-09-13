@@ -9,6 +9,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from ooxml_ledger.canon import canon_of_manifest, manifest
+from ooxml_ledger.mcp.journal import WorkingJournal
 from ooxml_ledger.mcp.session import (
     ORPHAN_GRACE_SECONDS,
     SESSIONS_DIRNAME,
@@ -486,6 +487,50 @@ def test_sweep_leaves_an_expired_session_alone_while_its_lock_is_held(document):
     assert not root.exists()
 
 
+def test_sweep_leaves_an_expired_session_alone_while_its_journal_holds_operations(
+    document,
+):
+    """session-durability-01 (F08): EXPIRY IS NOT A LICENCE TO DELETE AN UNSEALED RECORD
+    either. `_lock_is_held` above protects a session something is actively USING; this is the
+    twin for a session nothing is touching right now but whose journal still names a real,
+    uncommitted, undiscarded edit. Before this, `sweep` deleted such a session exactly like an
+    empty one — precisely the failure session-durability-01 measured: a restart forked a
+    second session over the edited document, and the TTL sweep then erased the first
+    session's journal, leaving the edit on disk with no record anywhere describing it.
+
+    Skipping is self-clearing here too: the session stays expired, so discarding its journal
+    lets the very next sweep collect it — the tail of this test proves that, exactly as the
+    lock-held twin above does.
+    """
+    sid, root, _meta = _make_session(document, ttl=3600)
+    WorkingJournal(path=root / "journal.jsonl").append(
+        {
+            "op": "text_edit",
+            "author": "tester",
+            "at": "2026-08-27T10:00:00Z",
+            "mode": "direct",
+            "target": {"part": "word/document.xml", "para_index": 0},
+            "before": "a",
+            "after": "b",
+        }
+    )
+    stale = json.loads((root / "meta.json").read_text())
+    stale["expires"] = "2020-01-01T00:00:00Z"
+    (root / "meta.json").write_text(json.dumps(stale), encoding="utf-8")
+
+    report = sweep(sessions_dir_for(document))
+
+    assert report.removed == []
+    assert root.is_dir()
+    assert any(sid in s and "operation" in s for s in report.skipped), report
+
+    (root / "journal.jsonl").write_text(
+        "", encoding="utf-8"
+    )  # discard the recorded edit
+    assert sweep(sessions_dir_for(document)).removed == [sid]
+    assert not root.exists()
+
+
 def test_sweep_leaves_a_live_session_alone(document):
     _sid, root, _meta = _make_session(document)
     report = sweep(sessions_dir_for(document))
@@ -723,3 +768,45 @@ def test_taking_the_lock_on_a_removed_session_refuses_and_does_not_recreate_it(
     ):
         pass
     assert not root.exists()
+
+
+# --- the per-document lock's refusal paths ------------------------------------------------
+
+
+def test_the_document_lock_refuses_by_name_when_its_file_cannot_be_opened(tmp_path):
+    from ooxml_ledger.mcp.session import document_open_lock
+
+    with (
+        pytest.raises(ToolError, match="could not open the per-document lock"),
+        document_open_lock(tmp_path / "missing" / "sessions"),
+    ):
+        pass
+
+
+def test_the_document_lock_refuses_by_name_after_its_bounded_wait(
+    tmp_path, monkeypatch
+):
+    import fcntl
+
+    from ooxml_ledger.mcp import session as session_mod
+
+    monkeypatch.setattr(session_mod, "OPEN_LOCK_TIMEOUT_SECONDS", 0.05)
+    with (tmp_path / session_mod.OPEN_LOCK_FILENAME).open("a+") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with (
+                pytest.raises(ToolError, match="timed out"),
+                session_mod.document_open_lock(tmp_path),
+            ):
+                pass
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+
+def test_an_unreadable_journal_counts_as_unknown_not_empty(tmp_path):
+    from ooxml_ledger.mcp.session import _journal_op_count
+
+    (tmp_path / "journal.jsonl").write_text(
+        "this is not a journal line\n", encoding="utf-8"
+    )
+    assert _journal_op_count(tmp_path) is None

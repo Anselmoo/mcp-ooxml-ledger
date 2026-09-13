@@ -275,6 +275,23 @@ def test_save_refuses_when_content_types_has_been_removed(tmp_path):
         pkg.save(tmp_path / "out.docx")
 
 
+def test_zip_bomb_is_refused_and_nothing_is_extracted(tmp_path):
+    """A tiny archive that expands to hundreds of MB must be refused by the size/ratio
+    guard before `testzip`/`extract` ever decompresses it — measured at F14: a 204 KB
+    archive containing one all-zero entry expanded to 200 MB on disk with no cap in
+    place."""
+    p = tmp_path / "bomb.docx"
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("word/document.xml", "<w:document/>")
+        z.writestr("word/media/bomb.bin", b"\x00" * (200 * 1024 * 1024))
+
+    work = tmp_path / "w"
+    with pytest.raises(PackageError, match="zip bomb"):
+        Package.open(p, work)
+    assert not work.exists()
+
+
 def test_encrypted_entry_is_refused_and_cleans_the_workdir(tmp_path):
     """A password-protected entry makes zipfile.testzip() raise RuntimeError, not
     zipfile.BadZipFile — that must not escape as a raw traceback, and must not leave
@@ -298,3 +315,73 @@ def test_encrypted_entry_is_refused_and_cleans_the_workdir(tmp_path):
     with pytest.raises(PackageError, match="password-protected|corrupt"):
         Package.open(p, work)
     assert not work.exists()
+
+
+def test_an_archive_with_too_many_entries_is_refused_before_extraction(tmp_path):
+    """PR #2 review: the size and ratio caps bound decompressed BYTES, not the NUMBER of
+    entries. Millions of zero-byte entries pass every byte cap while `testzip()`,
+    `extract()` and `parts()` still walk each one (inode and CPU exhaustion). The count is
+    checked from the central directory before anything is decompressed or written."""
+    from ooxml_ledger.pkg import MAX_ENTRY_COUNT
+
+    p = tmp_path / "many.docx"
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("word/document.xml", "<w:document/>")
+        for i in range(MAX_ENTRY_COUNT):
+            z.writestr(f"word/media/e{i}.bin", b"")
+
+    work = tmp_path / "w"
+    with pytest.raises(PackageError, match="entries"):
+        Package.open(p, work)
+    assert not work.exists()
+
+
+def test_every_corpus_archive_sits_far_below_the_entry_cap():
+    """Guard against a cap that refuses real documents: two orders of magnitude of headroom."""
+    from ooxml_ledger.pkg import MAX_ENTRY_COUNT
+
+    largest = max(len(zipfile.ZipFile(p).infolist()) for p in ALL)
+    assert largest * 100 <= MAX_ENTRY_COUNT, (largest, MAX_ENTRY_COUNT)
+
+
+# --- each zip cap refuses on its own (branch coverage for the F14 caps) ------------------
+
+
+def test_a_highly_compressible_entry_trips_the_ratio_cap_alone(tmp_path):
+    """1 MiB of zeros is far under both byte caps but compresses ~1000x."""
+    p = tmp_path / "ratio.docx"
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("word/document.xml", "<w:document/>")
+        z.writestr("word/media/zeros.bin", b"\x00" * (1024 * 1024))
+    with pytest.raises(PackageError, match="compression ratio"):
+        Package.open(p, tmp_path / "w")
+
+
+def test_many_stored_entries_trip_the_total_cap_alone(tmp_path, monkeypatch):
+    """Stored (ratio 1) entries each under the per-entry cap, but over the total cap.
+
+    Patched on `ooxml_ledger.core.pkg`: the shim re-exports the value, and rebinding the
+    shim's attribute would not change what `Package.open` reads."""
+    import ooxml_ledger.core.pkg as core_pkg
+
+    monkeypatch.setattr(core_pkg, "MAX_TOTAL_UNCOMPRESSED_SIZE", 64)
+    p = tmp_path / "total.docx"
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("word/document.xml", "<w:document/>")
+        z.writestr("word/a.bin", b"a" * 40)
+        z.writestr("word/b.bin", b"b" * 40)
+    with pytest.raises(PackageError, match="total uncompressed"):
+        Package.open(p, tmp_path / "w")
+
+
+def test_entries_that_collapse_on_disk_are_refused(tmp_path, monkeypatch):
+    """The belt-and-braces check after extraction: fewer parts on disk than archive entries
+    must refuse, or the digest would silently cover only the survivors."""
+    import ooxml_ledger.core.pkg as core_pkg
+
+    monkeypatch.setattr(core_pkg.Package, "parts", lambda self: [])
+    with pytest.raises(PackageError, match="collapsed"):
+        Package.open(ALL[0], tmp_path / "w")

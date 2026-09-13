@@ -485,6 +485,45 @@ def test_a_genuine_out_of_band_write_still_flags_the_document(server, docx):
     )
 
 
+# --- a stale session must not write over a document it can no longer account for -----
+
+
+@pytest.mark.parametrize(
+    ("tool", "params"),
+    [
+        ("apply_edits", apply_params),
+        ("delete_paragraph", delete_params),
+        ("insert_paragraph", insert_params),
+    ],
+)
+def test_a_verb_refuses_before_writing_when_the_document_drifted_from_the_journal(
+    server, docx, pandoc_docx, tool, params
+):
+    """session-durability-02 (F09): before this, the ONLY place that checked whether a
+    session's journal still accounted for the live document was `commit_document`, far too
+    late — a session left stale by ANY out-of-band replacement of the document (another
+    session's commit, a hand rollback, a bug in an older build that let two sessions fork)
+    could still write over it. `apply_edits` reported `applied: 1` for a batch that landed on
+    a document its own ledger no longer described, and the caller only learned anything was
+    wrong from a LATER `commit_document` refusal that did not even name the cause.
+
+    Reusing `gate.replay_forward` — the SAME replay `commit_document`'s own gate runs, rather
+    than a second implementation that could disagree with it — this must now refuse BEFORE the
+    write, by name, with the document byte-identical to how the drift left it and nothing
+    journalled.
+    """
+    sid = session_for(server)
+    docx.write_bytes(pandoc_docx.read_bytes())
+    drifted = docx.read_bytes()
+
+    message = refusal(server, tool, params(sid))
+
+    assert sid in message, message
+    assert docx.read_bytes() == drifted, "nothing may be written once refused"
+    assert journal_text(docx, sid) == ""
+    assert scratch_leftovers(docx, sid) == []
+
+
 # --- preview and apply may not disagree ----------------------------------------------
 
 
@@ -506,3 +545,113 @@ def test_a_truncated_journal_refuses_in_both_preview_and_apply(server, docx):
     assert previewed == applied, (previewed, applied)
     assert "truncated line" in previewed, previewed
     assert "Nothing was written" in previewed, previewed
+
+
+# --- the per-document lock spans check, write and record (PR #2 review) --------------------
+
+
+def _document_lock_is_held(document) -> bool:
+    """Probe the per-document `.open.lock` from a SEPARATE open file description, which is
+    how `flock` contends across threads and processes alike."""
+    import fcntl
+
+    path = sessions_dir_for(document) / ".open.lock"
+    with path.open("a+") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+
+
+def test_the_document_lock_probe_can_actually_detect_a_held_lock(server, docx):
+    """Guard the guard: a probe that always said 'free' would make the test below vacuous."""
+    from ooxml_ledger.mcp.session import document_open_lock
+
+    session_for(server)
+    with document_open_lock(sessions_dir_for(docx)):
+        assert _document_lock_is_held(docx)
+    assert not _document_lock_is_held(docx)
+
+
+@pytest.mark.parametrize(
+    ("tool", "params"),
+    [
+        ("apply_edits", apply_params),
+        ("delete_paragraph", delete_params),
+        ("insert_paragraph", insert_params),
+    ],
+)
+def test_a_verb_holds_the_document_lock_from_the_drift_check_through_the_journal_append(
+    server, docx, monkeypatch, tool, params
+):
+    """PR #2 review, two races with one cause. The drift check and the document replace were
+    covered only by the per-SESSION lock, so (a) another session or process could replace the
+    document between the check and this call's write, and (b) `open_document`, which scans
+    under the per-DOCUMENT lock, could observe the document already replaced but the journal
+    line not yet appended, skip this session as mismatched, and fork a second session whose
+    baseline absorbs the unjournalled edit. Both close when every writing verb holds the SAME
+    per-document lock across the check, the write and the record."""
+    from ooxml_ledger.mcp import tools_edit
+    from ooxml_ledger.mcp.journal import WorkingJournal
+
+    sid = session_for(server)
+    probes = {}
+    real_check = tools_edit._refuse_if_document_drifted
+    real_append = WorkingJournal.append_all
+
+    def check(session, live):
+        probes["drift_check"] = _document_lock_is_held(docx)
+        return real_check(session, live)
+
+    def append_all(self, operations):
+        probes["journal_append"] = _document_lock_is_held(docx)
+        return real_append(self, operations)
+
+    monkeypatch.setattr(tools_edit, "_refuse_if_document_drifted", check)
+    monkeypatch.setattr(WorkingJournal, "append_all", append_all)
+
+    call(server, tool, params(sid))
+
+    assert probes == {"drift_check": True, "journal_append": True}, probes
+    assert not _document_lock_is_held(docx), (
+        "the lock must be released when the call returns"
+    )
+
+
+def test_preview_refuses_a_drifted_session_with_the_same_sentence_as_apply(
+    server, docx, pandoc_docx
+):
+    """PR #2 review: `apply_edits` refuses a stale session, but `preview_edits` did not run
+    the same precheck, so it could report a green preview for a batch the apply refuses,
+    contradicting the preview contract that the two cannot disagree."""
+    sid = session_for(server)
+    docx.write_bytes(pandoc_docx.read_bytes())
+
+    previewed = refusal(server, "preview_edits", apply_params(sid))
+    applied = refusal(server, "apply_edits", apply_params(sid))
+
+    assert sid in previewed, previewed
+    assert previewed == applied, (previewed, applied)
+
+
+def test_a_session_whose_journal_cannot_be_replayed_refuses_before_writing(
+    server, docx, monkeypatch
+):
+    from ooxml_ledger.core.errors import OoxmlLedgerError
+    from ooxml_ledger.mcp import tools_edit
+
+    sid = session_for(server)
+    before = docx.read_bytes()
+
+    def broken(*args, **kwargs):
+        raise OoxmlLedgerError("replay engine refused")
+
+    monkeypatch.setattr(tools_edit, "projected_digest", broken)
+    message = refusal(server, "apply_edits", apply_params(sid))
+
+    assert "can no longer be replayed" in message, message
+    assert sid in message, message
+    assert docx.read_bytes() == before
+    assert journal_text(docx, sid) == ""

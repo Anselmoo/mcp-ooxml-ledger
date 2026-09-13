@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 
 import pytest
 
@@ -140,3 +141,168 @@ def test_find_rejects_a_digest_with_a_trailing_newline(tmp_path):
     store = ReceiptStore.for_document(tmp_path / "ms.docx")
     with pytest.raises(ValueError, match="not a valid digest"):
         store.find("sha256:" + "a" * 64 + "\n")
+
+
+# --- F10: put_baseline must be atomic, not a bare shutil.copy2 onto the final name --------
+
+
+def test_put_baseline_failure_mid_copy_leaves_no_final_file(tmp_path, monkeypatch):
+    """An interrupted copy (simulated ENOSPC) must not leave a partial file under the
+    content-addressed baseline name — a partial file there looks like a stored baseline and
+    is never re-copied."""
+    store = ReceiptStore.for_document(tmp_path / "ms.docx")
+    source = tmp_path / "orig.docx"
+    source.write_bytes(b"PK\x03\x04" + b"x" * 1000)
+    digest = "sha256:" + "d" * 64
+
+    def boom(fsrc, fdst, *a, **kw):
+        fdst.write(b"partial")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(shutil, "copyfileobj", boom)
+    with pytest.raises(OSError):
+        store.put_baseline(digest, source)
+
+    assert store.baseline_for(digest) is None
+    assert not [p for p in store.baselines.rglob("*") if p.name.endswith(".tmp")]
+
+    monkeypatch.undo()
+    dest = store.put_baseline(digest, source)
+    assert dest.read_bytes() == source.read_bytes()
+
+
+def test_put_baseline_leaves_no_temp_file_behind(tmp_path):
+    store = ReceiptStore.for_document(tmp_path / "ms.docx")
+    source = tmp_path / "orig.docx"
+    source.write_bytes(b"content")
+    store.put_baseline("sha256:" + "e" * 64, source)
+    assert not [p for p in store.baselines.rglob("*") if p.name.endswith(".tmp")]
+
+
+# --- F12: durable publish must fsync the file and the directory, not just os.replace ------
+
+
+def test_publish_fsyncs_the_file_before_replace_and_the_directory_after(
+    tmp_path, monkeypatch
+):
+    """`os.replace` alone is not durable: without an fsync of the file's data and of the
+    directory entry that names it, a crash right after `put()` returns can lose the write."""
+    import ooxml_ledger.ledger.store as store_mod
+
+    calls: list[str] = []
+    real_fsync_file = store_mod._fsync_file
+    real_fsync_dir = store_mod._fsync_dir
+
+    def counting_fsync_file(fh):
+        calls.append("file")
+        real_fsync_file(fh)
+
+    def counting_fsync_dir(directory):
+        calls.append("dir")
+        real_fsync_dir(directory)
+
+    monkeypatch.setattr(store_mod, "_fsync_file", counting_fsync_file)
+    monkeypatch.setattr(store_mod, "_fsync_dir", counting_fsync_dir)
+
+    store = ReceiptStore.for_document(tmp_path / "ms.docx")
+    store.put(_receipt())
+
+    assert calls.count("file") >= 1
+    assert calls.count("dir") >= 1
+    assert calls.index("file") < calls.index("dir")
+
+
+def test_the_standalone_verify_path_imports_and_fsyncs_without_fcntl(tmp_path):
+    """PR #2 review: `fcntl` exists only on POSIX, but `ledger.store` sits on the standalone
+    CLI `verify` path and the project declares `Operating System :: OS Independent`. Only
+    darwin's `F_FULLFSYNC` needs it, so the store must import, and its fsync helpers must
+    still work, when `fcntl` cannot be imported at all (as on Windows)."""
+    import subprocess
+    import sys
+
+    target = tmp_path / "durable.bin"
+    code = (
+        "import sys, pathlib\n"
+        "sys.modules['fcntl'] = None  # makes `import fcntl` raise ImportError\n"
+        "import ooxml_ledger.ledger.store as store\n"
+        "import ooxml_ledger.verify\n"
+        "import ooxml_ledger.cli\n"
+        f"p = pathlib.Path({str(target)!r})\n"
+        "with p.open('wb') as fh:\n"
+        "    fh.write(b'x')\n"
+        "    store._fsync_file(fh)\n"
+        "store._fsync_dir(p.parent)\n"
+        "print('ok')\n"
+    )
+    out = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "ok"
+
+
+# --- the darwin F_FULLFSYNC upgrade, exercised on every platform -------------------------
+
+
+class _FakeFcntl:
+    F_FULLFSYNC = 51
+
+    def __init__(self, raises=False):
+        self.calls = []
+        self.raises = raises
+
+    def fcntl(self, fd, op):
+        self.calls.append(op)
+        if self.raises:
+            raise OSError("not supported on this mount")
+
+
+def _fsync_once(tmp_path):
+    from ooxml_ledger.ledger import store
+
+    with (tmp_path / "f.bin").open("wb") as fh:
+        fh.write(b"x")
+        store._fsync_file(fh)
+
+
+def test_darwin_upgrades_to_full_fsync(tmp_path, monkeypatch):
+    import sys
+
+    fake = _FakeFcntl()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "fcntl", fake)
+    _fsync_once(tmp_path)
+    assert fake.calls == [_FakeFcntl.F_FULLFSYNC]
+
+
+def test_darwin_full_fsync_failure_is_best_effort(tmp_path, monkeypatch):
+    """Some darwin mounts reject F_FULLFSYNC; the plain fsync already ran, so it is ignored."""
+    import sys
+
+    fake = _FakeFcntl(raises=True)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "fcntl", fake)
+    _fsync_once(tmp_path)
+    assert fake.calls == [_FakeFcntl.F_FULLFSYNC]
+
+
+def test_darwin_without_the_full_fsync_flag_skips_it(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "fcntl", types.SimpleNamespace())
+    _fsync_once(tmp_path)
+
+
+def test_darwin_without_fcntl_still_fsyncs(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    synced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.setattr(os, "fsync", lambda fd: synced.append(fd) or real_fsync(fd))
+    _fsync_once(tmp_path)
+    assert len(synced) == 1

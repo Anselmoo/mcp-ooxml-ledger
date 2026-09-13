@@ -1,8 +1,27 @@
+import asyncio
+
 import pytest
 
 pytest.importorskip("fastmcp")
 
+from fastmcp import Client
 from mcp_harness import call, tools
+
+
+def test_initialize_reports_the_package_version_not_fastmcps(server):
+    """`FastMCP(...)` was constructed with no `version=`, so the MCP `initialize` handshake
+    reported fastmcp's own package version (e.g. "4.0.1") as `serverInfo.version` instead of
+    this project's. A client deciding compatibility, or a user reading Desktop's server list,
+    sees the wrong version entirely."""
+    from ooxml_ledger import __version__
+
+    async def run():
+        async with Client(server) as client:
+            return client.server_info
+
+    info = asyncio.run(run())
+    assert info is not None
+    assert info.version == __version__
 
 
 def test_server_info_reports_the_versions_that_matter(server, workspace):
@@ -104,3 +123,73 @@ def test_the_console_script_is_wired(server):
 
     scripts = {e.name: e.value for e in entry_points(group="console_scripts")}
     assert scripts["ooxml-ledger-mcp"] == "ooxml_ledger.mcp.server:main"
+
+
+# --- F18: a missing documentRoot must not crash startup with a traceback -----------
+
+
+def test_a_missing_document_root_exits_cleanly_naming_the_setting(
+    monkeypatch, tmp_path, capsys
+):
+    """Before the fix, `Boundary.from_roots` raising a bare `ValueError` inside
+    `create_server` propagated straight out of `main()`: a Desktop user whose chosen
+    folder was later moved or renamed saw only 'server disconnected' plus a Python
+    traceback in the log, naming neither the environment variable nor the Desktop
+    setting responsible.
+    """
+    from ooxml_ledger.mcp.server import main
+
+    missing = tmp_path / "does-not-exist-any-more"
+    monkeypatch.setenv("OOXML_LEDGER_ROOTS", str(missing))
+
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+
+    assert excinfo.value.code != 0
+    captured = capsys.readouterr()
+    assert "OOXML_LEDGER_ROOTS" in captured.err
+    assert "Document root" in captured.err
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+
+
+def test_a_missing_document_root_never_falls_back_to_the_cwd(monkeypatch, tmp_path):
+    """Failing closed means failing closed: `main()` must not catch the boundary error
+    and retry with a substitute root (`Path.cwd()`, or no roots at all) once the
+    configured root is gone. `create_server` must be attempted exactly once, with no
+    `roots=` override — i.e. still reading the (missing) `OOXML_LEDGER_ROOTS` value
+    itself, never a fallback `main()` chose on its behalf."""
+    from ooxml_ledger.mcp import server as server_module
+
+    missing = tmp_path / "gone"
+    monkeypatch.setenv("OOXML_LEDGER_ROOTS", str(missing))
+    monkeypatch.chdir(tmp_path)
+
+    calls: list[tuple[tuple, dict]] = []
+    real_create_server = server_module.create_server
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_create_server(*args, **kwargs)
+
+    monkeypatch.setattr(server_module, "create_server", spy)
+    with pytest.raises(SystemExit):
+        server_module.main()
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert "roots" not in kwargs and len(args) == 0
+
+
+def test_main_runs_the_server_when_the_roots_are_valid(monkeypatch):
+    from ooxml_ledger.mcp import server as server_mod
+
+    ran = []
+
+    class _Fake:
+        def run(self):
+            ran.append(True)
+
+    monkeypatch.setattr(server_mod, "create_server", lambda read_only=False: _Fake())
+    server_mod.main()
+    assert ran == [True]

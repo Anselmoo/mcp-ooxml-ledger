@@ -13,6 +13,7 @@ untrusted server's hints — so nothing about safety depends on them.
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -20,9 +21,10 @@ from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel
 
+from .. import __version__
 from ..canon.rules import CANON_VERSION
+from ..core.pkg import CONTAINER_MAIN_PART
 from ..ledger.models import SCHEMA_VERSION
-from ..pkg import CONTAINER_MAIN_PART
 from .deps import (
     ACCIDENT_EVIDENT_CAVEAT,
     EDITABLE_KINDS,
@@ -32,7 +34,7 @@ from .deps import (
     Deps,
     ledger_meta,
 )
-from .guards import Boundary
+from .guards import ROOTS_ENV_VAR, Boundary
 from .session import SessionRegistry
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -124,6 +126,7 @@ def create_server(
     deps = Deps(boundary=Boundary.from_roots(roots), registry=SessionRegistry())
     server = FastMCP(
         name="ooxml-ledger",
+        version=__version__,
         instructions=SERVER_INSTRUCTIONS,
         mask_error_details=True,
     )
@@ -190,8 +193,27 @@ def main() -> None:
     `Boundary.from_roots` list.
 
     `read_only` comes the same way, from `OOXML_LEDGER_READ_ONLY` via `read_only_from_env`.
+
+    `Boundary.from_roots` raises a bare `ValueError` when a configured root is not a
+    directory — refusing is correct (failing open would widen the boundary) and stays
+    exactly as strict, but a client just launching this as a subprocess turns an
+    uncaught exception into a bare traceback in a log a Desktop user never reads, naming
+    neither the environment variable nor the Desktop "Document root" setting behind it.
+    Report it in one line on stderr instead and exit non-zero — never falling back to
+    the working directory or to no roots at all, which is exactly what letting `roots`
+    default inside `from_roots` (rather than substituting something here) guarantees.
     """
-    create_server(read_only=read_only_from_env()).run()
+    try:
+        server = create_server(read_only=read_only_from_env())
+    except ValueError as exc:
+        print(
+            f"ooxml-ledger-mcp: {exc}. Check the {ROOTS_ENV_VAR} environment variable "
+            "(the Desktop app's 'Document root' setting sets this) and make sure it "
+            "names an existing directory.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
+    server.run()
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -20,7 +20,7 @@ from xml.parsers import expat
 
 from pydantic import BaseModel, ConfigDict
 
-from ..errors import XmlSecurityError
+from ..core.errors import XmlSecurityError
 
 _SEP = "\x01"
 _QUOTES = (0x22, 0x27)  # " '

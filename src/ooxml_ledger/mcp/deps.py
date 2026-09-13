@@ -5,7 +5,8 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict
 
 from .. import __version__
-from ..constants import ACCIDENT_EVIDENT_CAVEAT
+from ..core.constants import ACCIDENT_EVIDENT_CAVEAT
+from ..gate import EDITABLE_KINDS
 from .guards import Boundary
 from .session import SessionRegistry
 
@@ -46,12 +47,13 @@ STATELESS_TAG = "stateless"  # takes no session_id
 SESSION_TAG = "session"  # takes a session_id
 GATE_TAG = "gate"  # enforces the accountability gate
 
-#: The document kinds an editing verb accepts. ONE definition, because `server_info`
-#: advertises it and `tools_edit._checked_editable_kind` enforces it, and a server that
-#: advertises a format it then refuses is worse than one that advertises nothing. `formats/`
-#: provides wml.py (WordprocessingML) and pml.py (PresentationML) and nothing else; xlsx is
-#: deliberately absent until an SpreadsheetML engine exists.
-EDITABLE_KINDS = frozenset({"docx", "pptx"})
+#: The document kinds an editing verb accepts. ONE definition, imported from `..gate`
+#: (never redefined here), because `server_info` advertises it, `tools_edit
+#: ._checked_editable_kind` enforces it, and `gate._replay_one` is what can actually replay
+#: it -- a server that advertises, or accepts, a format its own gate cannot replay is worse
+#: than one that refuses it up front (F11). `formats/` provides wml.py (WordprocessingML)
+#: and pml.py (PresentationML) and nothing else; xlsx is deliberately absent until a
+#: SpreadsheetML engine exists.
 
 #: Tags a read-only deployment drops. `session` is here as well as `writes` because
 #: `describe_structure` and `find_text` write nothing but are useless without

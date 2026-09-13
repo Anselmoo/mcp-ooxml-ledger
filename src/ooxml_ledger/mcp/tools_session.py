@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import secrets
 import shutil
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
@@ -18,19 +19,24 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel
 
 from ..canon import CANON_VERSION, canon_of_manifest, manifest
-from ..errors import OoxmlLedgerError
+from ..core.errors import OoxmlLedgerError
+from ..core.pkg import Package
 from ..ledger.store import ReceiptStore
 from ..outline import kind_of
-from ..pkg import Package
 from .deps import SESSION_TAG, STATELESS_TAG, WRITES_TAG, Deps, ledger_meta
 from .errors import engine_errors
 from .guards import SESSION_ID_RE, checked_ttl, refuse
+from .journal import WorkingJournal
 from .session import (
     SessionMeta,
+    document_open_lock,
+    is_expired,
     locked,
     new_session_id,
+    projected_digest,
     read_meta,
     remove_session_dir,
+    renew_expiry,
     sessions_dir_for,
     sweep,
     utc_now,
@@ -85,16 +91,62 @@ class CloseReport(BaseModel):
     removed_directory: str
 
 
-def _resumable(sessions: Path, document: Path, digest: str) -> Path | None:
-    """A live session for this exact document and baseline, or None.
+def _same_document(recorded: str, document: Path) -> bool:
+    """Whether `recorded` (a session's `meta.document`) names the same file as `document`.
 
-    The `pkg/` re-derivation at the end is not an optimisation — it is the second half of
-    BLOCK-B's fix. `SessionRegistry.load` REFUSES a session whose working copy has drifted from
+    PR #2 review: `Boundary` accepts a case-variant path on a case-insensitive filesystem (APFS,
+    NTFS) and hands it back with the caller's casing, so a string comparison missed the live
+    session and forked a second baseline and journal for the same file. Filesystem identity is
+    the comparison; when either side cannot be stat'ed, only exact string equality counts.
+    """
+    if recorded == str(document):
+        return True
+    try:
+        return Path(recorded).samefile(document)
+    except OSError:
+        return False
+
+
+def _resumable(sessions: Path, document: Path, digest: str, ttl: int) -> Path | None:
+    """A live session for this exact document whose recorded state still explains it, or None.
+
+    `ttl` is used only to RENEW an expired match's lease before handing it back — see the
+    final paragraph below. It plays no part in deciding which candidate matches.
+
+    session-durability-01 (F08): candidates are matched on `meta.document` alone, never on
+    `meta.baseline_digest` — that field is the digest at OPEN time and never changes, so
+    comparing it directly to the live document's digest stops matching after this session's
+    very first edit. What has to match instead is `projected_digest(pkg/, this session's journal)`
+    against the live digest: the frozen baseline with the session's own recorded operations
+    replayed onto it, via the SAME `gate.replay_forward` `commit_document` uses. An empty
+    journal makes this exactly today's check (replaying nothing reproduces the baseline), so a
+    freshly opened, unedited session still matches on baseline digest as before.
+
+    The `pkg/` re-derivation is not an optimisation — it is the second half of BLOCK-B's fix.
+    `SessionRegistry.load` REFUSES a session whose working copy has drifted from
     `meta.baseline_parts`, and `meta.json` is untouched by that drift; so a `_resumable` that
     read only `meta.json` re-found the poisoned directory on every `open_document` and returned
     the same id with `resumed=True`, for ever. Skipping it here means the next open forks a
     clean session instead, and the poisoned directory is removed by `close_document` or swept
     at its TTL.
+
+    A candidate whose journal is NOT EMPTY and whose replay does not reproduce the live
+    document REFUSES the whole call by name, rather than being skipped: forking a second
+    session over a document a live session's ledger no longer explains is exactly the failure
+    session-durability-01 measured — a restart forked session 2 over the edited document, and
+    the TTL sweep then erased session 1's journal, the only record of that edit. An empty
+    journal that fails to match, by contrast, is not "stale" — it never recorded anything to
+    begin with — so the scan simply continues past it, as before this fix.
+
+    session-durability-01 follow-up: `sweep` (`session.py`) now KEEPS an expired session whose
+    journal still holds operations, naming `commit_document` or `close_document(discard=true)`
+    as the way out. But a MATCHED candidate here can itself be expired — the sweep above ran
+    before this scan and left it in place for exactly that reason — and handing it back with
+    `expires` still in the past made both of those named recoveries refuse with "reopen the
+    document", which resumes the SAME expired session again: an unrecoverable loop, since
+    nothing else can advance `expires`. Renewing the lease HERE, at the moment this session is
+    judged still-explaining and handed back to a caller, is what makes sweep's own recovery
+    reachable.
     """
     for child in sorted(sessions.iterdir()) if sessions.is_dir() else []:
         if (
@@ -108,23 +160,58 @@ def _resumable(sessions: Path, document: Path, digest: str) -> Path | None:
         meta = read_meta(child)
         if meta is None:
             continue
-        if meta.document != str(document) or meta.baseline_digest != digest:
+        if not _same_document(meta.document, document):
             continue
+        package = Package(
+            root=child / "pkg", kind="." + meta.kind, source=Path(meta.document)
+        )
         try:
-            current = manifest(
-                Package(
-                    root=child / "pkg",
-                    kind="." + meta.kind,
-                    source=Path(meta.document),
-                )
-            )
+            current = manifest(package)
         except OoxmlLedgerError:
             # Unparseable working copy: not resumable, and not this function's job to
             # explain why. `load` names it if anyone still holds the id.
             continue
         if current != meta.baseline_parts:
             continue
-        return child
+
+        try:
+            journal_read = WorkingJournal(path=child / "journal.jsonl").read()
+        except ToolError as exc:
+            # Cannot tell whether this live session holds an unrecorded edit — fail closed
+            # rather than silently forking a second session over it. See `close_document`'s
+            # own "the count is best-effort, the refusal is not" reasoning; the same applies
+            # here to the OPEN, not just the close.
+            refuse(
+                f"session {child.name}'s working journal cannot be read ({exc}) while "
+                f"checking whether it holds an unrecorded edit to {document.name}. Nothing "
+                "was opened, and the live session was left alone. Recover with "
+                f"close_document(session_id={child.name!r}, discard=true) to abandon it, "
+                "then reopen the document."
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                replayed_digest = projected_digest(
+                    package, journal_read.operations, Path(tmp)
+                )
+            except OoxmlLedgerError:
+                replayed_digest = None
+
+        if replayed_digest == digest:
+            if is_expired(meta):
+                renew_expiry(child, meta, ttl)
+            return child
+        if journal_read.operations:
+            refuse(
+                f"session {child.name} still holds {len(journal_read.operations)} recorded "
+                f"operation(s), but {document.name} has changed outside this session — "
+                "replaying its journal onto its recorded baseline no longer reproduces the "
+                "document on disk. Nothing was opened, and the live session was left alone. "
+                f"Recover with close_document(session_id={child.name!r}, discard=true) to "
+                "abandon it, then reopen the document."
+            )
+        # Empty journal, no match: this candidate never recorded anything and its baseline
+        # is not the live document's state either. Keep scanning other candidates.
     return None
 
 
@@ -166,79 +253,90 @@ def register(server: FastMCP, deps: Deps) -> None:
                 kind = cast(DocumentKind, kind_of(pkg))
             digest = canon_of_manifest(parts)
 
-            existing = _resumable(sessions, path, digest)
-            if existing is not None:
-                # `_resumable` read meta.json to pick this directory, but it re-reads here and
-                # the file can vanish or be rewritten between the two calls — a concurrent
-                # sweep, another process, a hostile writer. `read_meta` returns None for all of
-                # those, and `None.session_id` is an AttributeError that masking turns into
-                # `Error calling tool 'open_document'`. Refuse by name instead.
-                resumed_meta = read_meta(existing)
-                if resumed_meta is None:
-                    refuse(
-                        f"session {existing.name} looked resumable but its meta.json is now "
-                        "missing or unreadable; it changed underneath this call. Retry: the "
-                        "next open will sweep or ignore it."
+            # session-durability-02 (F09): from here through registering the new session is
+            # the scan-and-create critical section. Without a lock spanning it, two concurrent
+            # opens can both see "nothing resumable" from `_resumable` and both fork a session
+            # — measured at 17 of 30 concurrent trials. The unpack above stays OUTSIDE the
+            # lock: it only touches this call's own `.incoming-` directory, so two callers
+            # unpacking in parallel costs nothing and keeps the locked section as short as the
+            # scan and the write it protects.
+            with document_open_lock(sessions):
+                existing = _resumable(sessions, path, digest, ttl)
+                if existing is not None:
+                    # `_resumable` read meta.json to pick this directory, but it re-reads here
+                    # and the file can vanish or be rewritten between the two calls — a
+                    # concurrent sweep, another process, a hostile writer. `read_meta` returns
+                    # None for all of those, and `None.session_id` is an AttributeError that
+                    # masking turns into `Error calling tool 'open_document'`. Refuse by name
+                    # instead.
+                    resumed_meta = read_meta(existing)
+                    if resumed_meta is None:
+                        refuse(
+                            f"session {existing.name} looked resumable but its meta.json is "
+                            "now missing or unreadable; it changed underneath this call. "
+                            "Retry: the next open will sweep or ignore it."
+                        )
+                    deps.registry.register(resumed_meta.session_id, existing)
+                    return OpenReport(
+                        session_id=resumed_meta.session_id,
+                        document=resumed_meta.document,
+                        name=resumed_meta.name,
+                        kind=resumed_meta.kind,
+                        canon=resumed_meta.canon,
+                        baseline_digest=resumed_meta.baseline_digest,
+                        parts=len(resumed_meta.baseline_parts),
+                        expires=resumed_meta.expires,
+                        resumed=True,
+                        baseline_stored=False,
+                        swept=report.removed,
+                        swept_skipped=report.skipped,
                     )
-                deps.registry.register(resumed_meta.session_id, existing)
-                return OpenReport(
-                    session_id=resumed_meta.session_id,
-                    document=resumed_meta.document,
-                    name=resumed_meta.name,
-                    kind=resumed_meta.kind,
-                    canon=resumed_meta.canon,
-                    baseline_digest=resumed_meta.baseline_digest,
-                    parts=len(resumed_meta.baseline_parts),
-                    expires=resumed_meta.expires,
-                    resumed=True,
-                    baseline_stored=False,
-                    swept=report.removed,
-                    swept_skipped=report.skipped,
-                )
 
-            session_id = new_session_id()
-            root = sessions / session_id
-            try:
-                # `Path.rename` IS `os.rename` (it calls it directly), so this keeps the
-                # single-syscall, same-filesystem atomicity the `.incoming-` staging exists
-                # for. Written as the pathlib form because ruff's PTH104 is enabled
-                # repo-wide and this line has no reason to need a carve-out.
-                incoming.rename(root)
-            except OSError as exc:
-                # Refuse by name. A bare OSError here — cross-device, permissions, a name
-                # collision, a full disk — masks to `Error calling tool 'open_document'`, and
-                # the caller is left with a session id that was never created and no idea why.
-                refuse(
-                    f"could not create the session directory for {path.name}: {exc}. The "
-                    f"unpacked copy is discarded; nothing under {sessions} was modified."
+                session_id = new_session_id()
+                root = sessions / session_id
+                try:
+                    # `Path.rename` IS `os.rename` (it calls it directly), so this keeps the
+                    # single-syscall, same-filesystem atomicity the `.incoming-` staging
+                    # exists for. Written as the pathlib form because ruff's PTH104 is
+                    # enabled repo-wide and this line has no reason to need a carve-out.
+                    incoming.rename(root)
+                except OSError as exc:
+                    # Refuse by name. A bare OSError here — cross-device, permissions, a name
+                    # collision, a full disk — masks to `Error calling tool
+                    # 'open_document'`, and the caller is left with a session id that was
+                    # never created and no idea why.
+                    refuse(
+                        f"could not create the session directory for {path.name}: {exc}. "
+                        f"The unpacked copy is discarded; nothing under {sessions} was "
+                        "modified."
+                    )
+
+                expires = (
+                    (datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=ttl))
+                    .isoformat()
+                    .replace("+00:00", "Z")
                 )
+                meta = SessionMeta(
+                    session_id=session_id,
+                    document=str(path),
+                    name=path.name,
+                    kind=kind,
+                    canon=CANON_VERSION,
+                    baseline_digest=digest,
+                    baseline_parts=parts,
+                    document_size=stat.st_size,
+                    document_mtime_ns=stat.st_mtime_ns,
+                    created=utc_now(),
+                    expires=expires,
+                    tool=deps.tool_id,
+                )
+                (root / "meta.json").write_text(
+                    meta.model_dump_json(indent=2), encoding="utf-8"
+                )
+                (root / "journal.jsonl").touch()
+                deps.registry.register(session_id, root)
         finally:
             shutil.rmtree(incoming, ignore_errors=True)
-
-        expires = (
-            (datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=ttl))
-            .isoformat()
-            .replace("+00:00", "Z")
-        )
-        meta = SessionMeta(
-            session_id=session_id,
-            document=str(path),
-            name=path.name,
-            kind=kind,
-            canon=CANON_VERSION,
-            baseline_digest=digest,
-            baseline_parts=parts,
-            document_size=stat.st_size,
-            document_mtime_ns=stat.st_mtime_ns,
-            created=utc_now(),
-            expires=expires,
-            tool=deps.tool_id,
-        )
-        (root / "meta.json").write_text(
-            meta.model_dump_json(indent=2), encoding="utf-8"
-        )
-        (root / "journal.jsonl").touch()
-        deps.registry.register(session_id, root)
 
         # design §5.2.1: keep a baseline the FIRST time a document enters the system — that
         # is, when no prior receipt matches it. Later baselines are previous results, each

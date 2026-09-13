@@ -1,11 +1,15 @@
-"""Module-level constants shared across engine and MCP layers."""
+"""Compatibility shim: Shared constants now live in `ooxml_ledger.core.constants`.
 
-from __future__ import annotations
+Kept so external callers importing the old path keep working. Nothing inside this package
+may import through it (`tests/test_import_graph.py` pins that). Every name is the SAME object
+as in `ooxml_ledger.core.constants`, but rebinding an attribute on THIS module (e.g. with
+monkeypatch) does not change what the kernel itself sees -- patch the core module instead.
+"""
 
-ACCIDENT_EVIDENT_CAVEAT = (
-    "An unsigned receipt is accident-evident, not tamper-evident: anyone who can edit the "
-    "document can recompute its digest and rewrite the receipt. Signing the receipt, or "
-    "anchoring its hash somewhere the document's holder does not control (a git commit, a "
-    "DOI, a submission portal), is what buys tamper-evidence. This tool never describes an "
-    "unsigned receipt as a seal."
+from .core.constants import (
+    ACCIDENT_EVIDENT_CAVEAT,
 )
+
+__all__ = [
+    "ACCIDENT_EVIDENT_CAVEAT",
+]

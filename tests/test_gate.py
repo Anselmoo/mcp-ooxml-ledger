@@ -1072,3 +1072,63 @@ def test_the_unreadable_part_is_named_and_the_reason_is_the_engine_s_own(tmp_pat
     assert len(problems) == 1, problems
     assert problems[0].startswith(f"{DOC}: ")
     assert "WordprocessingML" in problems[0]
+
+
+# --- F11: a package kind with no replay engine must be refused BY NAME, not sent to Word ---
+#
+# `_replay_one` special-cased only `_PPTX_KINDS`; every other `text_edit`/`paragraph_*` fell
+# through unconditionally to `wml.*`. On an xlsx session (reachable only through a tampered
+# `journal.jsonl`) that made the refusal say "part declares no WordprocessingML element; it
+# cannot be a Word content part" -- CLAUDE.md's recurring "the component exists, therefore
+# the path works" pattern, blaming a perfectly good worksheet part for the missing engine.
+# The commit was still refused either way, so there is no accountability hole; this is about
+# the refusal naming the right thing.
+
+XLSX = "xlsx-producer.xlsx"
+SHEET1 = "xl/worksheets/sheet1.xml"
+
+
+def _xlsx_session(tmp_path):
+    baseline = tmp_path / "baseline.xlsx"
+    shutil.copy(CORPUS / XLSX, baseline)
+    return baseline, Package.open(baseline, tmp_path / "work")
+
+
+def _forged_text_edit(part=SHEET1):
+    return {
+        "op": "text_edit",
+        "target": {"part": part, "para_index": 0, "offset": 0},
+        "before": "x",
+        "after": "y",
+        "author": "Bob",
+        "at": AT,
+        "mode": "direct",
+    }
+
+
+def _forged_paragraph_delete(part=SHEET1):
+    return {
+        "op": "paragraph_delete",
+        "target": {"part": part, "para_index": 0},
+        "author": "Bob",
+        "at": AT,
+        "mode": "direct",
+    }
+
+
+@pytest.mark.parametrize(
+    "forge",
+    [_forged_text_edit, _forged_paragraph_delete],
+    ids=["text_edit", "paragraph_delete"],
+)
+def test_replay_names_xlsx_instead_of_blaming_the_part_for_missing_wordprocessingml(
+    tmp_path, forge
+):
+    baseline, _result = _xlsx_session(tmp_path)
+
+    with pytest.raises(GateFailure) as exc_info:
+        replay_forward(baseline, [forge()], workdir=tmp_path / "r")
+
+    message = str(exc_info.value)
+    assert "xlsx" in message
+    assert "WordprocessingML" not in message

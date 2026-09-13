@@ -21,8 +21,8 @@ from typing import NoReturn
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
 
+from ..core.pkg import CONTAINER_MAIN_PART
 from ..ledger.store import STORE_DIRNAME
-from ..pkg import CONTAINER_MAIN_PART
 
 SESSION_ID_RE = re.compile(r"[0-9a-f]{32}")
 #: Anchored, like the two copies in `ledger/`. It was written unanchored here, with a
@@ -45,6 +45,22 @@ ROOTS_ENV_VAR = "OOXML_LEDGER_ROOTS"
 def refuse(message: str) -> NoReturn:
     """Raise a refusal whose message is guaranteed to reach the caller."""
     raise ToolError(message)
+
+
+def _same_directory(a: Path, b: Path) -> bool:
+    """True only if `a` and `b` are the identical directory on disk (`st_dev`/`st_ino`).
+
+    Shared by `within_roots` (F15) and `checked_dest` (F13): both need a filesystem-
+    identity fallback for the case where a case-insensitive filesystem accepts a path
+    under different casing than a string comparison expects. Used ONLY to CONFIRM an
+    identity that a plain string/name check already suspects or missed — never on its
+    own to decide containment — so a path where either side does not exist yet (e.g. a
+    dest file not yet created) safely reports False rather than raising.
+    """
+    try:
+        return a.samefile(b)
+    except OSError:
+        return False
 
 
 def _plain_string(value: object, label: str) -> str:
@@ -178,7 +194,28 @@ class Boundary(BaseModel):
         return cls(roots=tuple(resolved))
 
     def within_roots(self, path: Path) -> bool:
-        return any(path == root or root in path.parents for root in self.roots)
+        if any(path == root or root in path.parents for root in self.roots):
+            return True
+        # Fallback for a case-insensitive, case-PRESERVING filesystem (APFS, NTFS): the
+        # string check above just failed, but `Path.resolve()` (see `_resolve`) keeps
+        # the CALLER's casing for a component that already exists on disk rather than
+        # renormalising it to what the directory entry actually reads, so an in-root
+        # path given in different casing than a root was recorded in no longer compares
+        # equal to that root even though the OS treats them as the same file
+        # (`os.path.samefile` is `True`). Confirm that by IDENTITY, never by loosening
+        # the string comparison itself: truncate `path` to each root's own depth and
+        # check whether that prefix is the same directory as the root. A path shorter
+        # than a root, or one whose prefix is a genuinely different directory (a
+        # symlink escape has already been dereferenced by `_resolve` before this is
+        # ever called), is still refused.
+        for root in self.roots:
+            depth = len(root.parts)
+            if len(path.parts) < depth:
+                continue
+            prefix = Path(*path.parts[:depth])
+            if _same_directory(prefix, root):
+                return True
+        return False
 
     def _roots_text(self) -> str:
         return ", ".join(str(r) for r in self.roots)
@@ -246,6 +283,40 @@ class Boundary(BaseModel):
             )
         return path
 
+    @staticmethod
+    def _is_inside_store(path: Path) -> bool:
+        """True if `path` names, or lies inside, a `.ooxml-ledger` receipt store.
+
+        Two independent checks, for two independent failure modes:
+
+          1. a casefold comparison on `path.parts`, catching a case-insensitive
+             filesystem's biggest trap: `Path.resolve()` (`_resolve`) keeps whatever
+             casing the caller supplied for a component that already exists on disk
+             rather than renormalising it, so `.OOXML-LEDGER/receipts/...` resolves to
+             the exact same directory as `.ooxml-ledger/receipts/...` on APFS while a
+             case-sensitive `in path.parts` sees two different strings and lets the
+             write through (F13). This check needs no filesystem access, so it also
+             refuses a store path that does not exist yet.
+          2. an identity check (`st_dev`/`st_ino`, via `_same_directory`) over every
+             EXISTING ancestor of `path`, refusing one that is the same directory as a
+             `STORE_DIRNAME` sibling in that ancestor's own parent, even when the
+             ancestor's own name does not casefold-match `STORE_DIRNAME` at all (e.g.
+             a bind mount or hard link aliasing the two). This is a narrow,
+             belt-and-braces check against exactly that one aliasing shape — it is
+             check 1 (the casefold comparison) that actually closes F13 for every
+             plain case variant; check 2 does not generalise to every possible way
+             two directories could be the same file, only to a store-shaped sibling.
+        """
+        if any(part.casefold() == STORE_DIRNAME.casefold() for part in path.parts):
+            return True
+        for ancestor in path.parents:
+            if not ancestor.is_dir():
+                continue
+            sibling = ancestor.parent / STORE_DIRNAME
+            if sibling.is_dir() and _same_directory(ancestor, sibling):
+                return True
+        return False
+
     def checked_json_path(self, raw: str) -> Path:
         path = self._resolve(raw, "receipt")
         if not path.is_file():
@@ -281,7 +352,7 @@ class Boundary(BaseModel):
         primitive into a bounded one.
         """
         path = self._resolve(raw, "dest")
-        if STORE_DIRNAME in path.parts:
+        if self._is_inside_store(path):
             refuse(
                 f"dest {raw!r} is inside the ledger's own store ({STORE_DIRNAME}/), which "
                 "holds every receipt and baseline for a document. Writing there would "

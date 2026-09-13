@@ -29,19 +29,20 @@ import os
 import secrets
 import shutil
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from ..canon import manifest
-from ..errors import OoxmlLedgerError
+from ..canon import canon_of_manifest, manifest
+from ..core.errors import OoxmlLedgerError
+from ..core.pkg import Package
+from ..gate import replay_forward
 from ..ledger.store import STORE_DIRNAME
-from ..pkg import Package
 from .guards import MAX_TTL_SECONDS, SESSION_ID_RE, checked_session_id, refuse
 from .journal import WorkingJournal
 
@@ -150,6 +151,91 @@ def session_lock(root: Path, session_id: str) -> Generator[None]:
         handle.close()
 
 
+#: The per-DOCUMENT lock (session-durability-02, F09): serialises `open_document`'s
+#: scan-and-create critical section — `_resumable`'s scan through writing the new session's
+#: `meta.json` — so two concurrent opens of one document can never both observe "nothing
+#: resumable" and both fork a session. Same directory as `LOCK_FILENAME`, same reason its name
+#: cannot collide with one: `.open.lock` cannot `SESSION_ID_RE.fullmatch`, and it is a FILE,
+#: which `sweep`'s `child.is_dir()` check already excludes regardless.
+#:
+#: Measured before this existed: 17 of 30 concurrent trials forked two live sessions over one
+#: unchanged document.
+OPEN_LOCK_FILENAME = ".open.lock"
+
+#: Bounded wait for `document_open_lock`. Never indefinite — a hung holder must become a NAMED
+#: refusal, not a client-visible call that never returns, and the critical section it guards
+#: is a handful of filesystem operations, not an operation that can legitimately run long.
+OPEN_LOCK_TIMEOUT_SECONDS = 30.0
+
+
+@contextmanager
+def document_open_lock(sessions: Path) -> Generator[None]:
+    """Hold the exclusive per-document open-lock, or REFUSE after a bounded wait.
+
+    Every `open_document` call takes this for the whole of its scan-and-create critical
+    section. Unlike `session_lock`, this BLOCKS (with a bound) rather than refusing
+    immediately: a busy SESSION is one the caller already has an id for and can retry, but a
+    busy document-open is a race between two callers who do not yet know about each other, and
+    the section it guards is short enough that a brief wait resolves it — see
+    `OPEN_LOCK_TIMEOUT_SECONDS`.
+
+    The writing verbs take the SAME lock (PR #2 review): `apply_edits` and `_write_one` (behind
+    `delete_paragraph` and `insert_paragraph`) hold it across the drift check, the document
+    replace and the journal append. Otherwise another writer could replace the document
+    between a session's drift check and its write, and an `open_document` scan could observe
+    the document already replaced but its journal line not yet appended, skip that session as
+    mismatched, and fork a second one over an unjournalled edit.
+
+    Lock order is always the session lock (non-blocking) first, then this one (bounded wait).
+    `open_document` holds this lock but never waits on a session lock (`sweep` only probes
+    them non-blockingly), so the order cannot deadlock.
+    """
+    path = sessions / OPEN_LOCK_FILENAME
+    try:
+        handle = path.open("a+")
+    except OSError as exc:
+        refuse(
+            f"could not open the per-document lock at {path} ({exc}). Nothing was opened."
+        )
+    try:
+        deadline = time.monotonic() + OPEN_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    refuse(
+                        f"timed out after {OPEN_LOCK_TIMEOUT_SECONDS:.0f}s waiting for "
+                        "another open or write of this document to finish. Nothing was opened "
+                        "or written. Retry."
+                    )
+                time.sleep(0.02)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def projected_digest(package: Package, operations: Sequence[Any], workdir: Path) -> str:
+    """The canonical digest produced by replaying `operations` onto `package`'s baseline.
+
+    Reuses `gate.replay_forward` — the SAME replay `commit_document`'s own gate runs — rather
+    than a second implementation that could disagree with it. `package` is repacked to a
+    container first because `replay_forward` opens a baseline FILE, not an unpacked tree;
+    `tools_commit._commit` does exactly this over `session.package` and documents it as
+    "measured canon-identical to the original on all ten corpus documents". Raises
+    `OoxmlLedgerError` (via `replay_forward`) when the baseline cannot be read or an operation
+    cannot be replayed onto it — the caller decides what that means for its own question.
+    """
+    workdir = Path(workdir)
+    baseline = package.save(workdir / f"baseline{package.kind}")
+    replayed, _ids = replay_forward(baseline, operations, workdir / "replay")
+    return canon_of_manifest(manifest(replayed))
+
+
 class SessionMeta(BaseModel):
     """The on-disk record. This file, not any object in memory, is the truth."""
 
@@ -230,8 +316,34 @@ class SweepReport(BaseModel):
     skipped: list[str]
 
 
-def _expired(meta: SessionMeta) -> bool:
+def is_expired(meta: SessionMeta) -> bool:
     return datetime.fromisoformat(meta.expires) <= datetime.now(UTC)
+
+
+def renew_expiry(root: Path, meta: SessionMeta, ttl_seconds: int) -> SessionMeta:
+    """Rewrite `<root>/meta.json` with `expires` set `ttl_seconds` from now; return the result.
+
+    session-durability-01 follow-up: `sweep` (above) now KEEPS an expired session whose
+    journal still holds recorded operations, rather than deleting the only record of an
+    unsealed edit. But `_resumable` used to hand such a session back with `resumed=True` and
+    `expires` still in the past. `SessionRegistry.load`'s expiry check then refused
+    `commit_document` AND `close_document(discard=true)` with "reopen the document" — and
+    reopening returned the SAME expired session again, forever: sweep's own named recovery
+    could not be reached. Renewing the lease here, at the moment a still-explaining session is
+    handed back to a caller, is what makes it usable again instead of merely visible.
+
+    Every other field is carried over unchanged — this is a lease renewal, not a re-open; the
+    baseline, its digest and part manifest, and the document stat pair must stay exactly what
+    they were when this session was opened.
+    """
+    expires = (
+        (datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=ttl_seconds))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    renewed = meta.model_copy(update={"expires": expires})
+    (root / "meta.json").write_text(renewed.model_dump_json(indent=2), encoding="utf-8")
+    return renewed
 
 
 def read_meta(root: Path) -> SessionMeta | None:
@@ -351,6 +463,20 @@ def _orphan_reason(root: Path) -> str | None:
     return None
 
 
+def _journal_op_count(root: Path) -> int | None:
+    """How many operations `root`'s working journal holds, or None when it cannot be read.
+
+    Used only by `sweep`'s expiry branch, where "cannot be read" must be treated exactly like
+    "holds at least one": deleting a directory whose journal cannot be proven empty is the
+    destructive direction — the same reasoning `close_document`'s own best-effort operation
+    count already documents one layer up (`tools_session.close_document`).
+    """
+    try:
+        return len(WorkingJournal(path=root / "journal.jsonl").read().operations)
+    except ToolError:
+        return None
+
+
 def sweep(sessions: Path) -> SweepReport:
     """Remove expired and orphaned session directories; report what stays and why.
 
@@ -385,7 +511,7 @@ def sweep(sessions: Path) -> SweepReport:
             if reason is not None:
                 skipped.append(f"{child.name}: {reason}")
                 continue
-        elif not _expired(meta):
+        elif not is_expired(meta):
             continue
         elif _lock_is_held(child):
             # EXPIRY IS NOT A LICENCE TO DELETE A SESSION SOMETHING IS USING. `_lock_is_held`
@@ -409,6 +535,33 @@ def sweep(sessions: Path) -> SweepReport:
                 "left in place"
             )
             continue
+        else:
+            # session-durability-01 (F08): EXPIRY IS NOT A LICENCE TO DELETE AN UNSEALED
+            # RECORD either. The lock-held branch above protects a session something is
+            # actively USING; this protects a session nothing is touching right now but whose
+            # journal still names a real, uncommitted, undiscarded edit. Before this, sweep
+            # deleted such a session exactly like an empty one — the failure measured in
+            # session-durability-01: a restart forked a second session over the edited
+            # document, and the TTL sweep then erased the first session's journal, leaving the
+            # edit on disk with no record anywhere describing it.
+            #
+            # "Cannot be read" is treated the same as "holds operations" — see
+            # `_journal_op_count`. Skipping is self-clearing: the session stays expired, so
+            # committing or discarding it lets the very next sweep collect it.
+            op_count = _journal_op_count(child)
+            if op_count is None or op_count:
+                skipped.append(
+                    f"{child.name}: expired, but its working journal "
+                    + (
+                        f"holds {op_count} recorded operation(s) with no receipt or "
+                        "discard — left in place; commit_document or "
+                        "close_document(discard=true) it"
+                        if op_count is not None
+                        else "cannot be read, so whether it holds an unrecorded edit is "
+                        "unknown — left in place; close_document(discard=true) it"
+                    )
+                )
+                continue
         try:
             remove_session_dir(child)
         except ToolError as exc:
@@ -487,7 +640,7 @@ class SessionRegistry:
             refuse(
                 f"session {sid}: meta.json records a different id ({meta.session_id})"
             )
-        if _expired(meta):
+        if is_expired(meta):
             refuse(f"session {sid} expired at {meta.expires}; reopen the document")
         # Package.kind is the DOTTED suffix; meta.kind is the receipt's bare form.
         package = Package(

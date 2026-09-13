@@ -15,6 +15,10 @@ from ooxml_ledger.canon.rules import is_excluded, normalize
 from ooxml_ledger.errors import XmlSecurityError
 from ooxml_ledger.formats import pml, wml
 from ooxml_ledger.outline import (
+    SNIPPET_RADIUS,
+    A,
+    S,
+    _content_priority_order,
     _innermost,
     describe,
     search,
@@ -272,17 +276,34 @@ def test_offsets_point_at_the_matched_text_in_the_raw_part(src, tmp_path):
     `start` +2 alone and `end` -1 alone each left all 48 tests green. Neither boundary was
     independently pinned, so any truncating off-by-one shipped.
 
-    Decoding the slice back to `hit.text` pins both ends at once.
+    Decoding the slice back pins both ends at once. `hit.text` itself is now a bounded
+    window (F16) rather than always the whole decoded run, so what is pinned against the
+    raw bytes is `text_length` (the whole run's decoded length) plus, when the window was
+    NOT truncated, `hit.text` outright; a truncated window is asserted as a genuine
+    substring of the full decode instead, which still catches a shifted offset — a window
+    computed from the wrong `start`/`end` would not land inside the real text at all.
     """
     pkg = Package.open(src, tmp_path / "w")
     checked = 0
     for hit in search(pkg, "e", limit=25):
         raw = pkg.read(hit.part)[hit.start : hit.end]
         assert b"<" not in raw and b">" not in raw
-        assert decode_text(raw).text == hit.text, (
-            f"{hit.part} [{hit.start}:{hit.end}] decodes to {decode_text(raw).text!r}, "
-            f"not the reported {hit.text!r}"
+        full_text = decode_text(raw).text
+        assert hit.text_length == len(full_text), (
+            f"{hit.part} [{hit.start}:{hit.end}] decodes to {len(full_text)} chars, "
+            f"not the reported text_length {hit.text_length}"
         )
+        if hit.text_truncated:
+            assert hit.text in full_text, (
+                f"{hit.part}: snippet {hit.text!r} is not a substring of the full "
+                f"decode {full_text!r}"
+            )
+            assert len(hit.text) < len(full_text)
+        else:
+            assert hit.text == full_text, (
+                f"{hit.part} [{hit.start}:{hit.end}] decodes to {full_text!r}, "
+                f"not the reported {hit.text!r}"
+            )
         checked += 1
     assert checked, f"{src.name} produced no hits; this test would be vacuous"
 
@@ -505,3 +526,189 @@ def test_search_reports_an_xlsx_hit_outside_worksheets_and_shared_strings(tmp_pa
     assert hit.sheet is None
     assert hit.ref is None
     assert hit.shared_string_index is None
+
+
+# --- F16: a match's `text` is a bounded window, not the whole run --------------------
+#
+# `outline.search` used to put `decode_text(inner).text` straight into `TextMatch.text` with
+# no cap: a single 5 MB run produced a 5+ MB response, doubled by fastmcp sending it as both
+# structured content and a text block. `text` is now a `SNIPPET_RADIUS`-char window either
+# side of the match, with `text_length`, `match_offset` and `text_truncated` reporting what
+# was cut. One large-run test per format, because docx/pptx/xlsx each build `fields` on a
+# different branch of `search`.
+
+
+def _needle_in_a_haystack(radius_multiple: int = 4) -> tuple[str, int]:
+    """A run comfortably longer than twice `SNIPPET_RADIUS` either side of the needle."""
+    pad = "x" * (SNIPPET_RADIUS * radius_multiple)
+    text = f"{pad}NEEDLE{pad}"
+    return text, len(pad)
+
+
+def test_search_docx_large_run_text_is_truncated_to_a_snippet(tmp_path):
+    pkg = _open("docx-word-g2.docx", tmp_path)
+    big, offset = _needle_in_a_haystack()
+    pkg.write(
+        "word/document.xml",
+        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        b'<w:document xmlns:w="' + W.encode() + b'">'
+        b"<w:body><w:p><w:r><w:t>" + big.encode() + b"</w:t></w:r></w:p></w:body>"
+        b"</w:document>",
+    )
+    (hit,) = search(pkg, "needle")
+    assert hit.text_truncated is True
+    assert hit.text_length == len(big)
+    assert hit.match_offset == offset
+    assert len(hit.text) < len(big)
+    assert len(hit.text) <= 2 * SNIPPET_RADIUS + len("needle")
+    assert "NEEDLE" in hit.text
+
+
+def test_search_pptx_large_run_text_is_truncated_to_a_snippet(tmp_path):
+    pkg = _open("pptx-ppt-g2.pptx", tmp_path)
+    big, offset = _needle_in_a_haystack()
+    pkg.write(
+        "ppt/slides/slide1.xml",
+        (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<root xmlns:a="{A}"><a:p><a:r><a:t>{big}</a:t></a:r></a:p></root>'
+        ).encode(),
+    )
+    (hit,) = search(pkg, "needle")
+    assert hit.text_truncated is True
+    assert hit.text_length == len(big)
+    assert hit.match_offset == offset
+    assert len(hit.text) < len(big)
+    assert len(hit.text) <= 2 * SNIPPET_RADIUS + len("needle")
+    assert "NEEDLE" in hit.text
+    assert hit.slide_id == 256
+
+
+def test_search_xlsx_large_run_text_is_truncated_to_a_snippet(tmp_path):
+    pkg = _open("xlsx-excel-g2.xlsx", tmp_path)
+    big, offset = _needle_in_a_haystack()
+    pkg.write(
+        "xl/extra.xml",
+        f'<extra xmlns="{S}"><t>{big}</t></extra>'.encode(),
+    )
+    (hit,) = search(pkg, "needle")
+    assert hit.text_truncated is True
+    assert hit.text_length == len(big)
+    assert hit.match_offset == offset
+    assert len(hit.text) < len(big)
+    assert len(hit.text) <= 2 * SNIPPET_RADIUS + len("needle")
+    assert "NEEDLE" in hit.text
+
+
+def test_search_short_text_is_not_truncated(tmp_path):
+    """The window only kicks in once the run is actually longer than it — a short run must
+    still come back whole, `text_truncated=False`, `text_length == len(text)`."""
+    (hit,) = search(_open("docx-word-g2.docx", tmp_path), "Probe Document")
+    assert hit.text_truncated is False
+    assert hit.text == "Canonical Digest Probe Document"
+    assert hit.text_length == len(hit.text)
+    assert hit.match_offset == hit.text.lower().find("probe document")
+
+
+def test_search_match_offset_survives_a_length_changing_lower(tmp_path):
+    """`match_offset` must be in the ORIGINAL run's coordinates, not `text.lower()`'s.
+
+    `'İ'` (U+0130, Latin Capital Letter I With Dot Above — common in Turkish text such as
+    "İstanbul") lowercases to TWO code points (`'i' + COMBINING DOT ABOVE`), so
+    `text.lower()` is longer than `text` whenever a run contains one. A prior version of
+    `search` found the match in `text.lower()` and used that offset directly against the
+    original `text` — one `'İ'` before the needle is enough to push every offset after it
+    out by one, and 300 of them (as built here) pushes the reported offset 300 places past
+    where the needle actually is, landing the snippet entirely past the match.
+    """
+    pkg = _open("docx-word-g2.docx", tmp_path)
+    pad_i = "İ" * 300
+    pad_x = "x" * 200
+    pad_y = "y" * 300
+    true_offset = len(pad_i) + len(pad_x)
+    big = f"{pad_i}{pad_x}NEEDLE{pad_y}"
+    pkg.write(
+        "word/document.xml",
+        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        b'<w:document xmlns:w="' + W.encode() + b'">'
+        b"<w:body><w:p><w:r><w:t>" + big.encode() + b"</w:t></w:r></w:p></w:body>"
+        b"</w:document>",
+    )
+    (hit,) = search(pkg, "needle")
+    assert hit.match_offset == true_offset
+    assert "NEEDLE" in hit.text
+    assert big[hit.match_offset : hit.match_offset + len("needle")].lower() == "needle"
+
+
+# --- F17: pptx `search` visits slides before layouts/masters/notes masters -----------
+#
+# `pkg.parts()` sorts alphabetically, and on pptx that means `ppt/notesMasters`,
+# `ppt/notesSlides`, `ppt/slideLayouts` and `ppt/slideMasters` all sort ahead of
+# `ppt/slides`. Flooding every non-slide part with far more hits than the default page
+# reproduces the exact failure mode: with the old ordering, the default-limit page fills
+# entirely with template text and never reaches a real slide, even though `slides()` puts
+# `ppt/slides/slide1.xml` first in presentation order.
+
+
+def test_search_pptx_default_page_ranks_slides_before_templates(tmp_path):
+    pkg = _open("pptx-ppt-g2.pptx", tmp_path)
+    filler = "".join(
+        f"<a:p><a:r><a:t>needle filler {i}</a:t></a:r></a:p>" for i in range(80)
+    )
+    template_parts = [
+        p
+        for p in pkg.parts()
+        if p.startswith(("ppt/slideLayouts/", "ppt/slideMasters/", "ppt/notesMasters/"))
+        and p.endswith(".xml")
+    ]
+    assert len(template_parts) >= 12, template_parts  # fixture assumption
+    for p in template_parts:
+        pkg.write(
+            p,
+            f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<root xmlns:a="{A}">{filler}</root>'.encode(),
+        )
+    # 12+ template parts * 80 filler hits each vastly outnumbers the default page (50),
+    # so under alphabetical part order every one of those hits sorts ahead of the slide.
+    pkg.write(
+        "ppt/slides/slide1.xml",
+        (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<root xmlns:a="{A}"><a:p><a:r><a:t>needle on the real slide</a:t>'
+            "</a:r></a:p></root>"
+        ).encode(),
+    )
+    hits = search(pkg, "needle")
+    assert len(hits) == 50  # DEFAULT_LIMIT, unaffected by this test
+    slide_hits = [h for h in hits if h.part.startswith("ppt/slides/")]
+    assert slide_hits, (
+        "default page has no ppt/slides/* hit even though a real slide matches — "
+        f"first part visited was {hits[0].part!r}"
+    )
+    assert hits[0].part == "ppt/slides/slide1.xml"
+
+
+def test_search_docx_default_page_visits_the_main_part_first(tmp_path):
+    """The main part happens to sort first alphabetically on every docx fixture already —
+    asserted explicitly so the ordering does not silently depend on that coincidence."""
+    pkg = _open("docx-producer.docx", tmp_path)
+    candidates = searchable_parts(pkg)
+
+    ordered = _content_priority_order(pkg, "docx", candidates)
+    assert ordered[0] == "word/document.xml"
+
+
+def test_the_offset_mapper_falls_through_to_the_text_length():
+    """With a character whose lowercase form is longer, an offset past the lowered text maps
+    to the end of the original text rather than raising."""
+    from ooxml_ledger.outline import _original_offset
+
+    text = "\u0130x"  # "İx": lowercases to 3 chars
+    assert len(text.lower()) != len(text)
+    assert _original_offset(text, 99) == len(text)
+
+
+def test_docx_priority_order_is_unchanged_without_the_main_part(tmp_path):
+    pkg = _open("docx-producer.docx", tmp_path)
+    candidates = ["word/styles.xml", "word/footnotes.xml"]
+    assert _content_priority_order(pkg, "docx", candidates) == candidates

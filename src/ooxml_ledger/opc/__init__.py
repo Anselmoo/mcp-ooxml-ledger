@@ -30,10 +30,10 @@ from posixpath import normpath
 
 from pydantic import BaseModel, ConfigDict
 
-from .errors import PackageError
-from .pkg import Package
-from .xml.locate import attr_value, find_spans
-from .xml.text import decode_text
+from ..core.errors import PackageError
+from ..core.pkg import Package
+from ..xml.locate import attr_value, find_spans, iter_attrs
+from ..xml.text import decode_text
 
 RELS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _RELATIONSHIP = f"{{{RELS_NS}}}Relationship"
@@ -41,6 +41,8 @@ _RELATIONSHIP = f"{{{RELS_NS}}}Relationship"
 _OFFICE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 SLIDE_REL = f"{_OFFICE_REL}/slide"
 WORKSHEET_REL = f"{_OFFICE_REL}/worksheet"
+
+P = "http://schemas.openxmlformats.org/presentationml/2006/main"
 
 
 class Relationship(BaseModel):
@@ -128,6 +130,49 @@ def relationships(pkg: Package, source_part: str) -> list[Relationship]:
                 target=target,
                 part=None if external else resolve_target(source_part, target),
                 external=external,
+            )
+        )
+    return out
+
+
+class SlideRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    slide_id: int
+    index: int
+    part: str | None
+
+
+def _prefixed_rel_id(tag: bytes) -> str | None:
+    """The value of the `r:id`-style attribute, whatever prefix the producer bound.
+
+    `CT_SlideIdListEntry/@id` and `CT_Sheet/@sheetId` are UNQUALIFIED, so the only prefixed
+    attribute ending in `:id` on these elements is the relationship id.
+    """
+    for name, value, _s, _e in iter_attrs(tag):
+        if name.endswith(b":id"):
+            return decode_text(value).text
+    return None
+
+
+def slides(pkg: Package) -> list[SlideRef]:
+    """Slides in `<p:sldIdLst>` order. Filesystem order is NEVER authoritative (design §4.6)."""
+    data = pkg.read("ppt/presentation.xml")
+    by_rel = {
+        r.id: r.part
+        for r in relationships(pkg, "ppt/presentation.xml")
+        if r.type == SLIDE_REL
+    }
+    out: list[SlideRef] = []
+    for index, span in enumerate(find_spans(data, f"{{{P}}}sldId")):
+        tag = data[span.start : span.tag_end]
+        raw_id = attr_value(tag, b"id")
+        if raw_id is None:
+            continue
+        out.append(
+            SlideRef(
+                slide_id=int(decode_text(raw_id).text),
+                index=index,
+                part=by_rel.get(_prefixed_rel_id(tag) or ""),
             )
         )
     return out

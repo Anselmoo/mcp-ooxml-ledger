@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import UTC, datetime
 
 import pytest
 
@@ -267,6 +268,225 @@ def test_a_session_directory_name_collision_at_creation_is_refused_by_name(
     assert (collision / "occupied.txt").exists()  # untouched by the failed rename
 
 
+# --- resuming across a restart, and refusing a session the document moved past ----
+#
+# session-durability-01 (F08): `_resumable` used to match a candidate only when the LIVE
+# document's digest still equalled the session's ORIGINAL baseline digest — true only before
+# the session's first edit. One `apply_edits` broke that match forever, so a restart (a fresh
+# in-memory registry, the same on-disk sessions/) forked a SECOND session whose baseline
+# already contained the unrecorded edit, and the first session's journal — the only record of
+# that edit — was later swept as an orphan. Replaying the journal onto the frozen `pkg/`
+# baseline via `gate.replay_forward` is what makes the match survive an edit.
+
+
+def test_a_restart_resumes_the_live_session_after_an_edit(server, docx):
+    """A fresh `create_server` has an empty in-memory registry — exactly a restart. Reopening
+    the same document must resume session 1, journal and all, not fork a session 2 over the
+    now-edited document."""
+    from ooxml_ledger.mcp.server import create_server
+
+    sid = open_doc(server)["session_id"]
+    call(
+        server,
+        "apply_edits",
+        {
+            "session_id": sid,
+            "edits": [
+                {"part": "word/document.xml", "old": "Probe", "new": "Restarted"}
+            ],
+            "author": "tester",
+            "mode": "direct",
+        },
+    )
+
+    fresh = create_server(roots=[docx.parent])
+    reopened = open_doc(fresh)
+
+    assert reopened["resumed"] is True
+    assert reopened["session_id"] == sid
+    assert len(list(sessions_dir_for(docx).glob("[0-9a-f]" * 32))) == 1
+
+    committed = call(fresh, "commit_document", {"session_id": sid}).structured_content
+    assert committed["gate"] == "passed"
+    assert committed["operations"] == 1
+
+
+def test_an_orphaned_journal_with_operations_survives_the_ttl_sweep(server, docx, pptx):
+    """The reachability half of F08: even a session `_resumable` will never touch again — here
+    because the NEXT open is for a different document sharing the same sessions/ directory —
+    must not have its unsealed journal silently deleted once it expires."""
+    sid = open_doc(server)["session_id"]
+    call(
+        server,
+        "apply_edits",
+        {
+            "session_id": sid,
+            "edits": [{"part": "word/document.xml", "old": "Probe", "new": "Orphaned"}],
+            "author": "tester",
+            "mode": "direct",
+        },
+    )
+    root = sessions_dir_for(docx) / sid
+    meta = json.loads((root / "meta.json").read_text())
+    meta["expires"] = "2020-01-01T00:00:00Z"
+    (root / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    body = open_doc(server, "deck.pptx")
+
+    assert sid not in body["swept"]
+    assert any(sid in s for s in body["swept_skipped"])
+    assert root.is_dir()
+
+
+def test_reopening_the_same_document_after_expiry_renews_the_lease_so_it_can_be_sealed(
+    server, docx
+):
+    """F08 follow-up: the previous test proves sweep KEEPS an expired session whose journal
+    holds operations, naming `commit_document` or `close_document(discard=true)` as the way
+    to recover it. But reopening the SAME document (not a different one, which is all the
+    previous test exercises) used to hand that session back with `resumed=True` and `expires`
+    still in the past — and both named recoveries refuse an expired session with "reopen the
+    document", which just returns this same expired session again. Nothing could ever advance
+    `expires`, so the loop never ended and the edit could neither be sealed nor discarded.
+    Reopening must renew the lease so the named recovery actually works.
+    """
+    sid = open_doc(server)["session_id"]
+    call(
+        server,
+        "apply_edits",
+        {
+            "session_id": sid,
+            "edits": [{"part": "word/document.xml", "old": "Probe", "new": "Renewed"}],
+            "author": "tester",
+            "mode": "direct",
+        },
+    )
+    root = sessions_dir_for(docx) / sid
+    meta = json.loads((root / "meta.json").read_text())
+    meta["expires"] = "2020-01-01T00:00:00Z"
+    (root / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    reopened = open_doc(server)
+    assert reopened["resumed"] is True
+    assert reopened["session_id"] == sid
+
+    renewed = json.loads((root / "meta.json").read_text())
+    assert datetime.fromisoformat(renewed["expires"]) > datetime.now(UTC), (
+        "the renewed lease must not still be in the past"
+    )
+
+    committed = call(server, "commit_document", {"session_id": sid}).structured_content
+    assert committed["gate"] == "passed"
+    assert committed["operations"] == 1
+
+
+def test_reopening_the_same_document_after_expiry_lets_the_edit_be_discarded(
+    server, docx
+):
+    """The other half of the same recovery: `close_document(discard=true)` must also work on
+    the just-renewed session, not just `commit_document`."""
+    sid = open_doc(server)["session_id"]
+    call(
+        server,
+        "apply_edits",
+        {
+            "session_id": sid,
+            "edits": [
+                {"part": "word/document.xml", "old": "Probe", "new": "Discarded"}
+            ],
+            "author": "tester",
+            "mode": "direct",
+        },
+    )
+    root = sessions_dir_for(docx) / sid
+    meta = json.loads((root / "meta.json").read_text())
+    meta["expires"] = "2020-01-01T00:00:00Z"
+    (root / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    reopened = open_doc(server)
+    assert reopened["session_id"] == sid
+
+    closed = call(
+        server, "close_document", {"session_id": sid, "discard": True}
+    ).structured_content
+    assert closed["closed"] is True
+    assert not root.exists()
+
+
+def test_a_live_session_with_operations_is_refused_by_name_when_the_document_moved_on(
+    server, docx, pandoc_docx
+):
+    """F08's other new rule: a live session whose journal is NOT empty must never be silently
+    forked past. If replaying its journal onto its recorded baseline no longer reproduces the
+    document on disk — here simulated the way another session's `commit_document` would leave
+    it — `open_document` refuses by name rather than handing back a second, competing session.
+    """
+    sid = open_doc(server)["session_id"]
+    call(
+        server,
+        "apply_edits",
+        {
+            "session_id": sid,
+            "edits": [{"part": "word/document.xml", "old": "Probe", "new": "Changed"}],
+            "author": "tester",
+            "mode": "direct",
+        },
+    )
+    docx.write_bytes(pandoc_docx.read_bytes())
+
+    message = refusal(server, "open_document", {"document": "ms.docx"})
+
+    assert sid in message
+    assert "changed" in message.lower()
+    assert "close_document" in message
+    assert (sessions_dir_for(docx) / sid).exists(), (
+        "the live session must not be forked over"
+    )
+    assert len(list(sessions_dir_for(docx).glob("[0-9a-f]" * 32))) == 1
+
+
+# --- concurrency: two opens of one document must never fork two sessions ---------
+
+
+def test_two_concurrent_opens_never_fork_two_sessions(server, docx):
+    """session-durability-02 (F09): fastmcp runs sync tools on worker threads, and nothing
+    serialised `_resumable`'s scan against session creation — 17 of 30 trials forked two live
+    sessions over one unchanged document before the per-document lock existed. The race is
+    timing-dependent, so this runs several trials; every one must land on exactly one session.
+    """
+    import threading
+
+    def worker(i, results, errors, barrier):
+        try:
+            barrier.wait(timeout=5)
+            results[i] = open_doc(server)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    sessions = sessions_dir_for(docx)
+    for trial in range(15):
+        results = [None, None]
+        errors = []
+        barrier = threading.Barrier(2)
+
+        threads = [
+            threading.Thread(target=worker, args=(i, results, errors, barrier))
+            for i in range(2)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, (trial, errors)
+        assert results[0] is not None and results[1] is not None, (trial, results)
+        live = list(sessions.glob("[0-9a-f]" * 32))
+        assert len(live) == 1, (trial, [p.name for p in live])
+        assert results[0]["session_id"] == results[1]["session_id"] == live[0].name
+
+        call(server, "close_document", {"session_id": live[0].name, "discard": True})
+
+
 # --- close -----------------------------------------------------------------------
 
 
@@ -409,3 +629,63 @@ def test_an_expired_session_is_refused_rather_than_served(server, docx):
     meta["expires"] = "2020-01-01T00:00:00Z"
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
     assert "expired" in refusal(server, "describe_structure", {"session_id": sid})
+
+
+def test_reopening_with_a_case_variant_path_resumes_the_same_session(server, docx):
+    """PR #2 review: `Boundary` accepts a case-variant path on a case-insensitive filesystem
+    (APFS, NTFS), but `_resumable` compared `meta.document` as a string, so reopening
+    `MS.DOCX` missed the live session for `ms.docx` and forked a second baseline and journal
+    for the same file. Documents are matched by filesystem identity."""
+    variant = docx.parent / docx.name.upper()
+    if not variant.exists():
+        pytest.skip(
+            "case-sensitive filesystem: the variant is a different, absent file"
+        )
+
+    first = open_doc(server)
+    again = open_doc(server, name=variant.name)
+
+    assert again["resumed"] is True, again
+    assert again["session_id"] == first["session_id"]
+    assert len(list(sessions_dir_for(docx).glob("[0-9a-f]" * 32))) == 1
+
+
+def test_same_document_is_false_when_neither_path_can_be_stated(tmp_path):
+    from ooxml_ledger.mcp.tools_session import _same_document
+
+    assert _same_document(str(tmp_path / "a.docx"), tmp_path / "a.docx") is True
+    assert (
+        _same_document(str(tmp_path / "gone-a.docx"), tmp_path / "gone-b.docx") is False
+    )
+
+
+def test_reopening_refuses_by_name_when_the_live_journal_cannot_be_read(server, docx):
+    sid = open_doc(server)["session_id"]
+    journal = sessions_dir_for(docx) / sid / "journal.jsonl"
+    journal.write_text("this is not a journal line\n", encoding="utf-8")
+
+    message = refusal(server, "open_document", {"document": "ms.docx"})
+
+    assert "working journal cannot be read" in message, message
+    assert sid in message, message
+    assert len(list(sessions_dir_for(docx).glob("[0-9a-f]" * 32))) == 1
+
+
+def test_a_candidate_whose_empty_journal_cannot_be_replayed_is_skipped(
+    server, docx, monkeypatch
+):
+    """An unreplayable candidate with NO recorded operations holds nothing to protect, so the
+    scan moves past it and the open creates a fresh session instead of refusing."""
+    from ooxml_ledger.core.errors import OoxmlLedgerError
+    from ooxml_ledger.mcp import tools_session
+
+    first = open_doc(server)
+
+    def broken(*args, **kwargs):
+        raise OoxmlLedgerError("replay engine refused")
+
+    monkeypatch.setattr(tools_session, "projected_digest", broken)
+    again = open_doc(server)
+
+    assert again["resumed"] is False, again
+    assert again["session_id"] != first["session_id"]

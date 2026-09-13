@@ -47,11 +47,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ..errors import EditNotFound, EditRefused, OoxmlLedgerError
+from ..core.errors import EditNotFound, EditRefused, OoxmlLedgerError
+from ..core.pkg import Package
 from ..ledger.models import DISCLOSURE_PREFIX as _DISCLOSURE_PREFIX
-from ..opc import SLIDE_REL, relationships, rels_part_for
-from ..outline import slides
-from ..pkg import Package
+from ..opc import SLIDE_REL, relationships, rels_part_for, slides
 from ..xml.locate import Span, attr_value, iter_spans
 from ..xml.splice import Splice, apply_splices
 from ..xml.text import decode_text, escape, require_xml_text
@@ -156,7 +155,7 @@ def slide_parts(pkg: Package) -> list[str]:
 
     `slide10.xml` sorts before `slide2.xml`, and a deck whose slides were reordered in
     PowerPoint keeps its original file names -- so filesystem order is wrong twice over.
-    Delegates to `outline.slides`, which already reads the id list and resolves it through
+    Delegates to `opc.slides`, which already reads the id list and resolves it through
     the relationships; a second reader of `p:sldIdLst` is a second thing to keep correct.
     """
     return [ref.part for ref in slides(pkg) if ref.part is not None]
@@ -204,7 +203,7 @@ def structural_problems(pkg: Package) -> list[str]:
       is the same defect one layer down and it is not confined to slides — a missing
       layout, theme or notes part breaks the deck the same way.
 
-    Slides are read through `outline.slides`, never by a second reader of `p:sldIdLst`:
+    Slides are read through `opc.slides`, never by a second reader of `p:sldIdLst`:
     `slide_parts`' docstring records why one reader of that element is all this codebase may
     have. A `SlideRef` whose `part` is None is precisely the unresolvable case, because
     `slides` populates it from the presentation part's slide relationships.
