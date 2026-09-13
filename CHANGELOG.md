@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The `.mcpb` bundle now uses `server.type: "uv"` instead of vendoring dependencies.** The
+  `python`-type bundle could not start in Claude Desktop on a stock macOS: the manifest ran a
+  bare `python` (not on `PATH`), and the vendored native extensions were cp313-only while the
+  nearest interpreter was 3.14. Desktop now runs
+  `uv run --directory ${__dirname} --frozen --no-dev ooxml-ledger-mcp` from a bundle carrying
+  `pyproject.toml`, `uv.lock`, `README.md`, `LICENSE` and `src/`. `--frozen` installs exactly
+  what `uv.lock` pins (the old vendoring ignored the lock and shipped fastmcp 4.0.3 against a
+  4.0.1 pin), and `--no-dev` keeps pytest, ruff and pre-commit out of the user's install.
+  `mcpb/server/main.py` is gone. **The host now needs `uv` on `PATH`, and first launch needs
+  network access.** `scripts/smoke_mcpb.py` launches the bundle through the manifest's own
+  `mcp_config`, fails on tool-set drift in both directions, and checks the resolved fastmcp
+  version against `uv.lock`.
+
 - **`fastmcp` moved from the exact pin `==4.0.0b3` to the range `>=4.0.1,<5`.** FastMCP 4.0.0
   went stable on 2026-08-31 and 4.0.1 followed on 2026-09-02. The exact pin's stated reason
   was that `fastmcp>=4` was *unsatisfiable* — no GA release existed on PyPI and uv will not
@@ -52,6 +65,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A server restart no longer turns an uncommitted edit into the next session's baseline.**
+  `open_document` resumes the session whose journal, replayed onto its frozen baseline,
+  reproduces the live document; if a same-document session holds operations the live file no
+  longer matches, the open is refused by name (with `close_document(..., discard)` as the way
+  out) instead of forking a session that absorbs the change. The TTL sweep keeps expired
+  sessions that still hold operations. Previously the orphaned journal was deleted, leaving an
+  edit that no receipt or journal explained.
+- **Concurrent `open_document` calls on one document no longer fork two live sessions.** The
+  scan-and-create is serialized by a lock on `sessions/.open.lock`, and the editing verbs refuse
+  by name, before writing, when the live document no longer equals the session's replay.
+- **Stored baselines and sealed receipts are written atomically and durably**
+  (temp file, fsync — `F_FULLFSYNC` on darwin — `os.replace`, directory fsync). An interrupted
+  baseline copy used to leave a truncated file under the content-addressed name, after which
+  `verify` raised instead of reporting; a corrupt stored baseline is now a named failure while
+  T1/T2 are still reported.
+- **`serverInfo.version` reports the package version** instead of fastmcp's.
+- **The commit gate names the format** when an operation targets a package with no replay
+  engine, instead of blaming the part via the Word engine.
+- **`find_text` ranks pptx slide text before layouts, masters and notes masters**, and bounds each
+  match to a snippet (`text_length`, `text_truncated`) under an overall response byte budget; a
+  single 5 MB run used to produce a 10.5 MB response.
+- **A `documentRoot` / `OOXML_LEDGER_ROOTS` that is not a directory** exits with one stderr line
+  naming the setting, instead of a traceback. It still never falls back to the working directory.
+- **An in-root path given with different casing** is accepted on case-insensitive filesystems
+  (identity check), while case-variant paths outside every root are still refused.
+
 - **`commit_document` answered a bare `Error calling tool 'commit_document'` for a document
   the Word engine cannot read — no reason at all, in the one path this product exists for.**
   `gate.structural_problems` is called outside any `try` at the end of `gate()`, and its Word
@@ -83,6 +122,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   un-ignored a FastMCP reference file that was never committed, on the stated grounds that "a
   committed plan must not point at a file that is not in the repository"; the file's substance
   is now design § 7.2, where all eight of its open questions re-run as assertions.
+
+### Security
+
+- **`export_receipt` can no longer overwrite the receipt store via a case variant.** On APFS,
+  `dest=".OOXML-LEDGER/receipts/..."` passed the case-sensitive store guard and replaced a real
+  receipt. The guard now compares case-insensitively and by directory identity.
+- **Zip-bomb limits on package open.** Declared sizes are checked before `testzip`/extract:
+  100 MiB total, 50 MiB per entry, 200x per-entry compression ratio. A 204 KB archive used to
+  expand to 200 MB on disk.
 
 ## [0.2.1] - 2026-08-31
 

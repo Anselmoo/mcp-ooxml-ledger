@@ -245,6 +245,29 @@ def test_t3_fails_when_the_stored_baseline_does_not_match(tmp_path):
     assert any("T3 failed" in r for r in v.reasons)
 
 
+def test_t3_reports_a_named_failure_when_the_stored_baseline_is_corrupt(tmp_path):
+    """F10: an interrupted copy (or any other damage) can leave an unreadable file at the
+    baseline's content-addressed name. `verify` must not raise out of that — T1 and T2 are
+    unaffected by the baseline at all, and T3 fails by name instead of an exception escaping.
+    """
+    doc, receipt = _prepare(tmp_path)
+    store = ReceiptStore.for_document(doc)
+    store.baselines.mkdir(parents=True, exist_ok=True)
+    stem = store._filename(receipt.baseline.digest).removesuffix(".json")
+    (store.baselines / (stem + ".docx")).write_bytes(b"not a zip file at all")
+
+    v = verify(doc, receipt=receipt)
+
+    assert v.outcome == "failed"
+    assert v.tiers["T1"] is True
+    assert v.tiers["T2"] is True
+    assert v.tiers["T3"] is False
+    assert v.baseline_checked is False
+    assert any("T3 failed" in r and "could not be read" in r for r in v.reasons), (
+        v.reasons
+    )
+
+
 def test_explicit_original_takes_precedence_over_a_stored_baseline(tmp_path):
     doc, receipt = _prepare(tmp_path)
     wrong = tmp_path / "wrong.docx"

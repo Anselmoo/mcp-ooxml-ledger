@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from .canon import canon, manifest
 from .canon.rules import CANON_VERSION
+from .errors import OoxmlLedgerError
 from .ledger.chain import first_break
 from .ledger.models import DISCLOSURE_PREFIX, Receipt
 from .ledger.store import ReceiptStore
@@ -200,14 +201,26 @@ def verify(
     )
     baseline_checked: bool | None = None
     if baseline_source is not None:
-        original_digest = _digest_of(baseline_source)
-        tiers["T3"] = original_digest == receipt.baseline.digest
-        baseline_checked = tiers["T3"]
-        if not tiers["T3"]:
-            reasons.append(
-                f"T3 failed: the baseline document digests to {original_digest}, but the "
-                f"receipt claims a baseline of {receipt.baseline.digest}"
-            )
+        try:
+            original_digest = _digest_of(baseline_source)
+        except (OoxmlLedgerError, OSError) as exc:
+            # F10: an interrupted copy (or any other damage) can leave an unreadable file at
+            # the baseline's content-addressed name. That must not raise out of `verify` —
+            # T1 and T2 above are unaffected by the baseline at all, so they are still
+            # reported — and it must not be silently folded into "no baseline available"
+            # (`baseline_checked=None`), which would hide a corrupt record as if it simply
+            # were not there.
+            tiers["T3"] = False
+            baseline_checked = False
+            reasons.append(f"T3 failed: the stored baseline could not be read: {exc}")
+        else:
+            tiers["T3"] = original_digest == receipt.baseline.digest
+            baseline_checked = tiers["T3"]
+            if not tiers["T3"]:
+                reasons.append(
+                    f"T3 failed: the baseline document digests to {original_digest}, but the "
+                    f"receipt claims a baseline of {receipt.baseline.digest}"
+                )
 
     if receipt.attestation.gate != "passed":
         reasons.append(

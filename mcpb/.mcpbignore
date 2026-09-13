@@ -1,7 +1,21 @@
 # mcpb pack always excludes .git, .DS_Store, *.mcpb and a handful of JS-tooling files
-# (see @anthropic-ai/mcpb's built-in EXCLUDE_PATTERNS) but knows nothing about Python
-# bytecode caches, which `build.sh`'s vendoring step leaves behind under server/lib.
-__pycache__/
-*.pyc
-*.pyo
-*.dist-info/RECORD
+# (see @anthropic-ai/mcpb's built-in EXCLUDE_PATTERNS). build.sh stages only manifest.json,
+# pyproject.toml, uv.lock, README.md, LICENSE and src/ into the packed directory -- nothing
+# below should ever actually match today. These patterns are defense-in-depth against a
+# future staging change that copies more than intended (a stray checked-out .venv/, a
+# __pycache__/ from running tests locally, etc).
+#
+# F06: a bare `*.dist-info/RECORD` (no `**/` prefix) is anchored to the top level under the
+# `ignore` package's gitignore semantics and never matches a nested path -- 71 nested RECORD
+# files shipped in the vendored bundle this replaced. Every pattern here that names a
+# directory is written `**/<name>/` so it matches at any depth, not just the bundle root.
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.dist-info/
+.venv/
+tests/
+dist/
+analysis/
+docs/
+.github/

@@ -292,6 +292,65 @@ def test_hostile_find_text_parameters_are_refused(server, docx, hostile, expecte
     assert expected in refusal(server, "find_text", params)
 
 
+def test_find_text_match_carries_snippet_bounds_fields(server, docx):
+    """F16: `text` is now a bounded window, and `text_length`/`match_offset`/
+    `text_truncated` say how it relates to the whole run. On a short hit like this one the
+    window covers the whole run, so `text_truncated` is False and `text_length` is exactly
+    `len(text)` — the additive fields must still be present and correct on the common case,
+    not only on a run big enough to actually get cut."""
+    (match,) = call(
+        server,
+        "find_text",
+        {"session_id": session_for(server, "ms.docx"), "query": "Probe Document"},
+    ).structured_content["matches"]
+    assert match["text_truncated"] is False
+    assert match["text_length"] == len(match["text"])
+    assert match["match_offset"] == match["text"].lower().find("probe document")
+
+
+def test_find_text_enforces_a_response_text_budget(server, docx, monkeypatch):
+    """A second bound alongside `max_results` paging (F16, orchestrator direction): MANY
+    snippet-sized matches summing past a sane response size stop the response early too,
+    and get the SAME `truncated=True` signal `max_results` paging already uses — one flag
+    for "there is more", whichever bound tripped it.
+
+    The production budget (256 KiB) is not something a small fixture can plausibly exceed,
+    so the module constant is monkeypatched down to make the mechanism observable without
+    a multi-megabyte document."""
+    from ooxml_ledger.mcp import tools_read
+
+    monkeypatch.setattr(tools_read, "RESPONSE_TEXT_BUDGET_BYTES", 10)
+    sid = session_for(server, "ms.docx")
+    # Measured: "the" has 6 case-insensitive hits across ms.docx, each well over 10 bytes.
+    body = call(
+        server, "find_text", {"session_id": sid, "query": "the"}
+    ).structured_content
+    assert len(body["matches"]) == 1
+    assert body["truncated"] is True
+
+
+def test_within_response_budget_always_keeps_the_first_match(monkeypatch):
+    """Direct unit test of the helper: a budget too small for even one match must not empty
+    the response — the false-"nothing found" reading is worse than a slightly-over-budget
+    reply."""
+    from ooxml_ledger.mcp import tools_read
+    from ooxml_ledger.outline import TextMatch
+
+    monkeypatch.setattr(tools_read, "RESPONSE_TEXT_BUDGET_BYTES", 1)
+    oversized = TextMatch(
+        part="word/document.xml",
+        text="x" * 50,
+        text_length=50,
+        text_truncated=False,
+        match_offset=0,
+        start=0,
+        end=50,
+    )
+    kept, exceeded = tools_read._within_response_budget([oversized, oversized])
+    assert kept == [oversized]
+    assert exceeded is True
+
+
 def test_read_tools_do_not_modify_the_document(server, docx):
     before = docx.read_bytes()
     sid = session_for(server, "ms.docx")

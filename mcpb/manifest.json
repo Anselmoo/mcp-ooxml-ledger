@@ -28,15 +28,19 @@
     "mcp"
   ],
   "server": {
-    "type": "python",
-    "entry_point": "server/main.py",
+    "type": "uv",
+    "entry_point": "src/ooxml_ledger/mcp/server.py",
     "mcp_config": {
-      "command": "python",
+      "command": "uv",
       "args": [
-        "${__dirname}/server/main.py"
+        "run",
+        "--directory",
+        "${__dirname}",
+        "--frozen",
+        "--no-dev",
+        "ooxml-ledger-mcp"
       ],
       "env": {
-        "PYTHONPATH": "${__dirname}/server/lib",
         "OOXML_LEDGER_ROOTS": "${user_config.documentRoot}",
         "OOXML_LEDGER_READ_ONLY": "${user_config.readOnly}"
       }

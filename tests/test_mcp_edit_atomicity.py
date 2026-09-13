@@ -485,6 +485,45 @@ def test_a_genuine_out_of_band_write_still_flags_the_document(server, docx):
     )
 
 
+# --- a stale session must not write over a document it can no longer account for -----
+
+
+@pytest.mark.parametrize(
+    ("tool", "params"),
+    [
+        ("apply_edits", apply_params),
+        ("delete_paragraph", delete_params),
+        ("insert_paragraph", insert_params),
+    ],
+)
+def test_a_verb_refuses_before_writing_when_the_document_drifted_from_the_journal(
+    server, docx, pandoc_docx, tool, params
+):
+    """session-durability-02 (F09): before this, the ONLY place that checked whether a
+    session's journal still accounted for the live document was `commit_document`, far too
+    late — a session left stale by ANY out-of-band replacement of the document (another
+    session's commit, a hand rollback, a bug in an older build that let two sessions fork)
+    could still write over it. `apply_edits` reported `applied: 1` for a batch that landed on
+    a document its own ledger no longer described, and the caller only learned anything was
+    wrong from a LATER `commit_document` refusal that did not even name the cause.
+
+    Reusing `gate.replay_forward` — the SAME replay `commit_document`'s own gate runs, rather
+    than a second implementation that could disagree with it — this must now refuse BEFORE the
+    write, by name, with the document byte-identical to how the drift left it and nothing
+    journalled.
+    """
+    sid = session_for(server)
+    docx.write_bytes(pandoc_docx.read_bytes())
+    drifted = docx.read_bytes()
+
+    message = refusal(server, tool, params(sid))
+
+    assert sid in message, message
+    assert docx.read_bytes() == drifted, "nothing may be written once refused"
+    assert journal_text(docx, sid) == ""
+    assert scratch_leftovers(docx, sid) == []
+
+
 # --- preview and apply may not disagree ----------------------------------------------
 
 

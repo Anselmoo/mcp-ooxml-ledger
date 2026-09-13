@@ -275,6 +275,23 @@ def test_save_refuses_when_content_types_has_been_removed(tmp_path):
         pkg.save(tmp_path / "out.docx")
 
 
+def test_zip_bomb_is_refused_and_nothing_is_extracted(tmp_path):
+    """A tiny archive that expands to hundreds of MB must be refused by the size/ratio
+    guard before `testzip`/`extract` ever decompresses it — measured at F14: a 204 KB
+    archive containing one all-zero entry expanded to 200 MB on disk with no cap in
+    place."""
+    p = tmp_path / "bomb.docx"
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("word/document.xml", "<w:document/>")
+        z.writestr("word/media/bomb.bin", b"\x00" * (200 * 1024 * 1024))
+
+    work = tmp_path / "w"
+    with pytest.raises(PackageError, match="zip bomb"):
+        Package.open(p, work)
+    assert not work.exists()
+
+
 def test_encrypted_entry_is_refused_and_cleans_the_workdir(tmp_path):
     """A password-protected entry makes zipfile.testzip() raise RuntimeError, not
     zipfile.BadZipFile — that must not escape as a raw traceback, and must not leave

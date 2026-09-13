@@ -64,6 +64,38 @@ READ_ONLY = ToolAnnotations(
     read_only_hint=True, idempotent_hint=True, open_world_hint=False
 )
 
+#: A second bound on `find_text`'s response, alongside `max_results` paging. F16's
+#: per-match snippet window (`outline.SNIPPET_RADIUS`) already keeps any ONE match small;
+#: this keeps MANY snippet-sized matches from summing past a sane response size. 256 KiB
+#: of UTF-8 match text is generous for a page of snippets and still nowhere near the
+#: unbounded multi-megabyte responses F16 was filed against.
+RESPONSE_TEXT_BUDGET_BYTES = 256 * 1024
+
+
+def _within_response_budget(
+    matches: list[TextMatch],
+) -> tuple[list[TextMatch], bool]:
+    """Trim `matches`, IN ORDER, to `RESPONSE_TEXT_BUDGET_BYTES` of UTF-8 `text`.
+
+    Always keeps at least the first match — one snippet that alone exceeds the budget
+    (it cannot, given F16's per-match cap, but this stays correct if that cap ever
+    changes) must not turn into an empty, indistinguishable-from-no-hits response.
+
+    Returns the kept matches and whether anything was dropped, so the caller can fold
+    that into the SAME `truncated` flag `max_results` paging already reports — one
+    signal for "there is more", regardless of which bound triggered it.
+    """
+    kept: list[TextMatch] = []
+    used = 0
+    for match in matches:
+        size = len(match.text.encode("utf-8"))
+        if kept and used + size > RESPONSE_TEXT_BUDGET_BYTES:
+            return kept, True
+        kept.append(match)
+        used += size
+    return kept, False
+
+
 BASELINE_FIELD = Field(
     description=(
         "The canonical digest of this document AS IT WAS WHEN THE SESSION WAS OPENED, and of "
@@ -150,9 +182,15 @@ def register(server: FastMCP, deps: Deps) -> None:
         description=(
             "Case-insensitive substring search over every text-bearing part the digest "
             "covers, returning the best address this build can give for each hit: paragraph "
-            "id or index and hash for docx, slide id for pptx, sheet and cell for xlsx. "
-            "Results come from the session's working copy as opened; `verify` is what reports "
-            "on the file currently on disk."
+            "id or index and hash for docx, slide id for pptx, sheet and cell for xlsx. On "
+            "pptx, real slides (in presentation order) are visited before slide layouts, "
+            "masters and notes masters, so the default page surfaces slide content first. "
+            "Each match's `text` is a bounded window around the hit, not the whole run — "
+            "`text_length` and `match_offset` locate it in the full run, and "
+            "`text_truncated` says whether it was cut; a large result set can also stop "
+            "early on total response size, reported the same way as `max_results` paging: "
+            "`truncated=True`. Results come from the session's working copy as opened; "
+            "`verify` is what reports on the file currently on disk."
         ),
         annotations=READ_ONLY,
         tags={READ_ONLY_TAG, SESSION_TAG},
@@ -192,12 +230,14 @@ def register(server: FastMCP, deps: Deps) -> None:
             # "there is more" that sends an agent paging through nothing.
             found = search(session.package, needle, part=chosen, limit=limit + 1)
         truncated = len(found) > limit
+        matches, budget_exceeded = _within_response_budget(found[:limit])
+        truncated = truncated or budget_exceeded
         return FindTextReport(
             session_id=session.meta.session_id,
             query=needle,
             part=chosen,
             baseline_digest=session.meta.baseline_digest,
             document_may_have_changed_since_open=session.document_may_have_changed,
-            matches=found[:limit],
+            matches=matches,
             truncated=truncated,
         )

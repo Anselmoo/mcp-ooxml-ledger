@@ -71,6 +71,38 @@ _WORKSHEET = re.compile(r"^xl/worksheets/sheet\d+\.xml$")
 DEFAULT_LIMIT = 50
 
 
+def _original_offset(text: str, lowered_offset: int) -> int:
+    """Translate an offset found in `text.lower()` back into `text`'s own coordinates.
+
+    `str.lower()` changes LENGTH for a few Unicode characters — `'İ'` (U+0130, Latin
+    Capital Letter I With Dot Above, common in Turkish text) lowercases to the two code
+    points `'i' + COMBINING DOT ABOVE` — so an offset found by scanning `text.lower()`
+    can point past where the match actually starts once sliced out of the ORIGINAL
+    string. The common case (every character's `lower()` is the same length as the
+    character itself) is checked up front and returned untranslated, which is the
+    overwhelming majority of real text; only when lengths differ does this walk `text`
+    char by char, tracking how far each character's lowered form has advanced the
+    lowered-string cursor, to find which original character the match offset actually
+    falls under.
+    """
+    lowered = text.lower()
+    if len(lowered) == len(text):
+        return lowered_offset
+    pos = 0
+    for i, ch in enumerate(text):
+        pos += len(ch.lower())
+        if pos > lowered_offset:
+            return i
+    return len(text)
+
+
+#: Chars of context kept on each side of the match inside a match's returned `text` window,
+#: once the run's full decoded text is longer than the window. A 5 MB run otherwise lands
+#: whole in one `TextMatch`, doubled by fastmcp sending it as both structured content and a
+#: text block.
+SNIPPET_RADIUS = 80
+
+
 class SheetRef(BaseModel):
     model_config = ConfigDict(frozen=True)
     name: str
@@ -98,12 +130,23 @@ class DocumentOutline(BaseModel):
 
 
 class TextMatch(BaseModel):
-    """One hit, with the best address this build can honestly give for its format."""
+    """One hit, with the best address this build can honestly give for its format.
+
+    `text` is a bounded window, not the run's full decoded text: `text_length` is the whole
+    run's character count, `match_offset` is the needle's position within it (case-
+    insensitive), and `text_truncated` says whether `text` had to be cut down to
+    `SNIPPET_RADIUS` chars either side of that offset. `start`/`end` are unaffected — still
+    the byte span of the WHOLE run in the raw part, because that is what a future edit
+    splices against.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     part: str
     text: str
+    text_length: int
+    text_truncated: bool
+    match_offset: int
     start: int
     end: int
     para_index: int | None = None
@@ -292,6 +335,49 @@ def _para_hashes(kind: str, part: str, data: bytes) -> dict[int, str]:
     return {para.span.start: para.text_hash for para in wml.iter_paragraphs(part, data)}
 
 
+def _content_priority_order(
+    pkg: Package, kind: str, candidates: list[str]
+) -> list[str]:
+    """Reorder `candidates` so the parts a human would call "the content" come first.
+
+    `candidates` already IS the full searchable set (membership is untouched, see
+    `searchable_parts`) — this only changes visitation order, which is what a caller
+    hitting the default page size actually sees. `pkg.parts()` sorts alphabetically
+    (`Package.parts`), and on pptx that puts `ppt/notesMasters`, `ppt/notesSlides`,
+    `ppt/slideLayouts` and `ppt/slideMasters` ahead of `ppt/slides` — so the default
+    50-hit page filled with boilerplate template text before a single real slide, on
+    every pptx fixture measured. `find_text` sets `truncated=True` in that case, but an
+    agent that does not check the flag reads a template hit as "the text is not on any
+    slide".
+
+    - pptx: slides, in `<p:sldIdLst>` presentation order (never filesystem order,
+      design §4.6) — then notes slides — then everything else (layouts, masters,
+      notes masters, ...) in the alphabetical order `candidates` already carries.
+    - docx: the main part (`word/document.xml`) first, then everything else
+      unchanged — already true alphabetically on this corpus, made explicit so it
+      does not depend on that coincidence.
+    - xlsx: unchanged (per the F17 fix direction — no format-specific priority order
+      is established for spreadsheets).
+    """
+    if kind == "pptx":
+        remaining = list(candidates)
+        slide_parts = [
+            s.part for s in slides(pkg) if s.part is not None and s.part in remaining
+        ]
+        for p in slide_parts:
+            remaining.remove(p)
+        notes_parts = [p for p in remaining if p.startswith("ppt/notesSlides/")]
+        for p in notes_parts:
+            remaining.remove(p)
+        return slide_parts + notes_parts + remaining
+    if kind == "docx":
+        main = "word/document.xml"
+        if main in candidates:
+            return [main] + [p for p in candidates if p != main]
+        return candidates
+    return candidates
+
+
 def search(
     pkg: Package, query: str, part: str | None = None, limit: int = DEFAULT_LIMIT
 ) -> list[TextMatch]:
@@ -309,6 +395,8 @@ def search(
     candidates = _included_xml_parts(pkg)
     if part is not None:
         candidates = [p for p in candidates if p == part]
+    else:
+        candidates = _content_priority_order(pkg, kind, candidates)
 
     slide_by_part = {s.part: s for s in slides(pkg)} if kind == "pptx" else {}
     sheet_by_part = {s.part: s for s in sheets(pkg)} if kind == "xlsx" else {}
@@ -333,11 +421,19 @@ def search(
             if not inner:
                 continue
             text = decode_text(inner).text
-            if needle not in text.lower():
+            lowered_offset = text.lower().find(needle)
+            if lowered_offset < 0:
                 continue
+            offset = _original_offset(text, lowered_offset)
+            window_start = max(0, offset - SNIPPET_RADIUS)
+            window_end = min(len(text), offset + len(needle) + SNIPPET_RADIUS)
+            snippet_truncated = window_start > 0 or window_end < len(text)
             fields: dict[str, Any] = {
                 "part": name,
-                "text": text,
+                "text": text[window_start:window_end] if snippet_truncated else text,
+                "text_length": len(text),
+                "text_truncated": snippet_truncated,
+                "match_offset": offset,
                 "start": span.tag_end,
                 "end": span.tag_end + len(inner),
             }

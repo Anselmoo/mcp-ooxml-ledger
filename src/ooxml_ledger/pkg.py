@@ -38,6 +38,24 @@ CONTAINER_MAIN_PART = {
 _SYMLINK_MODE = 0o120000
 _FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
+# Zip-bomb caps (F14). A hostile archive can declare a tiny compressed size while
+# expanding to hundreds of MB (or worse) once extracted — `zf.testzip()` decompresses
+# every entry, and `zf.extract()` writes the result to disk, so both must be guarded
+# against by a cheap pre-pass over `infolist()` (declared sizes only, no decompression)
+# before either runs.
+#
+# Measured across every archive in tests/fixtures/corpus (2026-09-13, this repo's own
+# test corpus, the only real documents on hand): total uncompressed size per archive
+# maxed out at 831,538 bytes (~812 KiB, docx-producer.docx), the single largest entry
+# was 438,131 bytes (~428 KiB, docx-producer.docx:word/stylesWithEffects.xml), and the
+# worst per-entry ratio (uncompressed / compressed) was ~32.16 (same entry). The caps
+# below sit at least two orders of magnitude above each of those measurements, so no
+# corpus fixture trips them, while the demonstrated bomb (a 200 MiB all-zero entry in a
+# 204 KB archive, ratio ~1029) trips the entry-size, total-size AND ratio checks alike.
+MAX_TOTAL_UNCOMPRESSED_SIZE = 100 * 1024 * 1024  # 100 MiB
+MAX_ENTRY_UNCOMPRESSED_SIZE = 50 * 1024 * 1024  # 50 MiB
+MAX_COMPRESSION_RATIO = 200  # uncompressed / compressed, per entry
+
 
 class Package(BaseModel):
     """An unpacked OOXML container rooted at `root`."""
@@ -66,6 +84,31 @@ class Package(BaseModel):
         try:
             zf = zipfile.ZipFile(path)
             with zf:
+                infolist = zf.infolist()
+                total_size = 0
+                for info in infolist:
+                    total_size += info.file_size
+                    if info.file_size > MAX_ENTRY_UNCOMPRESSED_SIZE:
+                        raise PackageError(
+                            f"{path.name}: entry {info.filename!r} declares "
+                            f"{info.file_size} uncompressed bytes, over the "
+                            f"{MAX_ENTRY_UNCOMPRESSED_SIZE}-byte per-entry cap. Refusing "
+                            "as a likely zip bomb before decompressing it."
+                        )
+                    ratio = info.file_size / max(info.compress_size, 1)
+                    if ratio > MAX_COMPRESSION_RATIO:
+                        raise PackageError(
+                            f"{path.name}: entry {info.filename!r} has a compression "
+                            f"ratio of {ratio:.1f}, over the {MAX_COMPRESSION_RATIO}x "
+                            "cap. Refusing as a likely zip bomb before decompressing it."
+                        )
+                if total_size > MAX_TOTAL_UNCOMPRESSED_SIZE:
+                    raise PackageError(
+                        f"{path.name}: archive declares {total_size} total uncompressed "
+                        f"bytes, over the {MAX_TOTAL_UNCOMPRESSED_SIZE}-byte cap. "
+                        "Refusing as a likely zip bomb before decompressing it."
+                    )
+
                 bad = zf.testzip()
                 if bad is not None:
                     raise PackageError(f"{path.name}: corrupt entry {bad!r}")

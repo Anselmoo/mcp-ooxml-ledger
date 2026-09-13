@@ -35,6 +35,7 @@ from .canon import canon, manifest
 from .errors import GateFailure, OoxmlLedgerError
 from .formats import pml, wml
 from .ledger.models import Attestation
+from .outline import kind_of
 from .pkg import Package
 
 _WORD_KINDS = (".docx", ".dotx")
@@ -44,6 +45,15 @@ _WORD_KINDS = (".docx", ".dotx")
 #: `pml` with its own reason, not fall through to the Word engine and come back as "part
 #: declares no WordprocessingML element", which blames the wrong thing.
 _PPTX_KINDS = (".pptx", ".potx")
+
+#: Bare format kinds (`outline.kind_of`'s vocabulary) with a replay engine in this build --
+#: exactly `_WORD_KINDS` and `_PPTX_KINDS`, projected through `kind_of`. SHARED with
+#: `mcp.deps.EDITABLE_KINDS` (imported FROM here, never redefined there) and consumed by
+#: `mcp.tools_edit._checked_editable_kind`, so the set of formats an editing tool will
+#: attempt and the set `_replay_one` can actually replay cannot drift apart -- see F11, where
+#: an xlsx `text_edit`/`paragraph_delete` fell through to the Word engine and came back
+#: blaming the part ("no WordprocessingML element") instead of naming the missing engine.
+EDITABLE_KINDS = frozenset({"docx", "pptx"})
 
 
 class GateVerdict(BaseModel):
@@ -151,6 +161,24 @@ def _replay_one(
         # already wraps into a `GateFailure` naming the operation's position.
         pml.replay_operation(pkg, op)
         return
+
+    if (
+        kind in ("text_edit", "paragraph_delete", "paragraph_insert")
+        and pkg.kind not in _WORD_KINDS
+    ):
+        # The Word engine is only used for WORD kinds. Before this check, anything that
+        # wasn't `_PPTX_KINDS` fell through unconditionally to `wml.*` below -- on an xlsx
+        # (or a pptx forged with a docx-only op type) that reached `wml.iter_paragraphs`,
+        # which raised "part declares no WordprocessingML element; it cannot be a Word
+        # content part". True of the part, and beside the point: nothing is wrong with the
+        # worksheet, this build simply has no replay engine for it. Named here, by FORMAT,
+        # instead of blaming the part -- CLAUDE.md's recurring "the component exists,
+        # therefore the path works" defect, fixed once already for pptx (the branch above)
+        # and missed for everything else.
+        raise GateFailure(
+            f"operation {kind!r} targets a {kind_of(pkg)} package, which has no replay "
+            "engine in this build"
+        )
 
     if kind == "text_edit":
         data = pkg.read(part)

@@ -1,48 +1,54 @@
 #!/usr/bin/env bash
 # Build the ooxml-ledger MCPB bundle.
 #
-# Vendors the project and its runtime dependencies into server/lib (pip's --target layout,
-# the convention `mcpb init` itself generates for a Python server: see the manifest's
-# `PYTHONPATH: "${__dirname}/server/lib"`), then validates and packs manifest.json + server/
-# into a .mcpb archive with the `@anthropic-ai/mcpb` CLI.
+# `server.type: "uv"` (manifest.json) means the bundle vendors nothing: Claude Desktop runs
+# `uv run --directory ${__dirname} --frozen --no-dev ooxml-ledger-mcp` on the user's own
+# machine, and `--frozen` makes uv install exactly what `uv.lock` pins -- no fresh resolve, no
+# drift from the versions the test suite actually ran against (that drift was F02: build.sh used to
+# `uv pip install --target` a fresh resolve that shipped fastmcp 4.0.3 while uv.lock pinned
+# 4.0.1). This script's only job is to stage the files uv needs to do that and pack them.
 #
-# Requirements: `uv` (to resolve and install into --target without touching this repo's own
-# .venv) and `npx` (to run `@anthropic-ai/mcpb`, fetched on demand -- nothing is installed
-# globally). Neither is vendored by this script; install them yourself first if missing.
+# Requirements: `uv` (to sanity-check the lock before packing) and `npx` (to run
+# `@anthropic-ai/mcpb`, fetched on demand -- nothing is installed globally). Neither is
+# vendored by this script; install them yourself first if missing.
 #
-# PLATFORMS: manifest.json claims ONLY "darwin". `uv pip install --target` fetches prebuilt
-# wheels for the platform it runs ON, and fastmcp's tree pulls in native extensions
-# (pydantic-core, cryptography, rpds-py, watchfiles, at minimum) -- the vendored libraries
-# in a bundle built here are cpython-313-darwin.so; a win32/linux user installing it gets an
-# ImportError. To widen the claim: re-run this script on that platform (or cross-target via
-# `uv pip install --python-platform`), add it to compatibility.platforms, and pack one
-# .mcpb per platform -- or at minimum verify PyPI carries manylinux/win_amd64 wheels for
-# every native dependency above before trusting a cross-targeted vendor tree. Claiming a
-# platform this build did not produce is the same defect the engine refuses everywhere
-# else -- asserting a check that never ran.
+# The HOST running the packed bundle needs `uv` too, and its first launch needs network
+# access to resolve `uv.lock` -- see README.md's "Desktop bundle (.mcpb)" section.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
-LIB_DIR="$HERE/server/lib"
 DIST_DIR="$REPO_ROOT/dist"
+STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mcpb-stage.XXXXXX")"
+trap 'rm -rf "$STAGE_DIR"' EXIT
 
 command -v uv >/dev/null 2>&1 || { echo "error: uv is required (https://docs.astral.sh/uv/)" >&2; exit 1; }
 command -v npx >/dev/null 2>&1 || { echo "error: npx (Node.js) is required for @anthropic-ai/mcpb" >&2; exit 1; }
 
-echo "==> Vendoring ooxml_ledger + runtime dependencies into server/lib (python 3.13)"
-rm -rf "$LIB_DIR"
-mkdir -p "$LIB_DIR"
-uv pip install --python 3.13 --target "$LIB_DIR" "$REPO_ROOT"
+echo "==> Checking uv.lock is up to date with pyproject.toml"
+(cd "$REPO_ROOT" && uv lock --check)
+
+echo "==> Staging bundle contents (no vendoring -- uv resolves uv.lock at first launch)"
+cp "$HERE/manifest.json" "$STAGE_DIR/manifest.json"
+cp "$HERE/.mcpbignore" "$STAGE_DIR/.mcpbignore"
+cp "$REPO_ROOT/pyproject.toml" "$STAGE_DIR/pyproject.toml"
+cp "$REPO_ROOT/uv.lock" "$STAGE_DIR/uv.lock"
+cp "$REPO_ROOT/README.md" "$STAGE_DIR/README.md"
+cp "$REPO_ROOT/LICENSE" "$STAGE_DIR/LICENSE"
+mkdir -p "$STAGE_DIR/src"
+cp -R "$REPO_ROOT/src/." "$STAGE_DIR/src/"
+find "$STAGE_DIR/src" -name '__pycache__' -type d -prune -exec rm -rf {} +
+find "$STAGE_DIR/src" -name '*.pyc' -delete
 
 echo "==> Validating manifest.json"
-npx --yes @anthropic-ai/mcpb validate "$HERE/manifest.json"
+npx --yes @anthropic-ai/mcpb validate "$STAGE_DIR/manifest.json"
 
 echo "==> Packing bundle"
 mkdir -p "$DIST_DIR"
 VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$HERE/manifest.json")"
 OUT="$DIST_DIR/ooxml-ledger-${VERSION}.mcpb"
-npx --yes @anthropic-ai/mcpb pack "$HERE" "$OUT"
+npx --yes @anthropic-ai/mcpb pack "$STAGE_DIR" "$OUT"
 
 echo "==> Built $OUT"
-echo "    Install by dragging this file onto Claude Desktop."
+echo "    Install by dragging this file onto Claude Desktop. The host needs uv on PATH;"
+echo "    first launch resolves the locked dependencies from uv.lock and may need network."

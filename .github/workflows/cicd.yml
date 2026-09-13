@@ -288,11 +288,11 @@ jobs:
 
   mcpb:
     name: Build & smoke-test the .mcpb bundle (macOS)
-    # macos-latest IS THE POINT. mcpb/build.sh vendors with `uv pip install --target`,
-    # which fetches wheels for the platform it runs on, and mcpb/manifest.json claims
-    # compatibility.platforms: ["darwin"] and nothing else. Building this on
-    # ubuntu-latest would ship linux .so files under a darwin claim -- the exact defect
-    # build.sh's own header refuses. Do not "simplify" this to ubuntu.
+    # macos-latest IS THE POINT: mcpb/manifest.json's compatibility.platforms declares
+    # "darwin" and nothing else, so this is the only platform CI proves the bundle launches
+    # on. The uv-type server (F01) vendors nothing -- uv resolves uv.lock for whatever
+    # platform it runs on at launch time -- but that resolution is only ever exercised here,
+    # on macOS. Do not "simplify" this to ubuntu; that would leave the darwin claim unproven.
     runs-on: macos-latest
     needs: [build]
     steps:
@@ -301,18 +301,16 @@ jobs:
         with:
           enable-cache: true
           python-version: "${{ env.PYTHON_VERSION }}"
-      # build.sh passes `--python 3.13` explicitly; make sure that request resolves.
-      - run: uv python install 3.13
-      - name: Vendor, validate, and pack the bundle
+      - name: Validate and pack the bundle
         run: bash mcpb/build.sh
       # `npx @anthropic-ai/mcpb validate`, which build.sh already ran, checks the
-      # manifest's SHAPE and never imports a vendored module. This starts the bundled
-      # server and speaks the MCP stdio handshake to it, so a bundle that packs cleanly
-      # but cannot import its native extensions fails here rather than on a user's
-      # machine. --python 3.13 matches what build.sh vendored; the script refuses to run
-      # under a mismatched interpreter rather than blaming the bundle.
+      # manifest's SHAPE. This unpacks the bundle, launches it exactly the way
+      # manifest.json's own mcp_config says a host will (`uv run --directory <bundle>
+      # --frozen ooxml-ledger-mcp`), and speaks the MCP stdio handshake to it -- so a bundle
+      # that packs cleanly but cannot resolve its lock, cannot start, or serves a tool set
+      # that contradicts its own manifest fails here rather than on a user's machine.
       - name: Smoke-test the bundle
-        run: uv run --no-project --python 3.13 python scripts/smoke_mcpb.py dist
+        run: uv run --no-project python scripts/smoke_mcpb.py dist
       - uses: actions/upload-artifact@v7
         with:
           name: mcpb-package

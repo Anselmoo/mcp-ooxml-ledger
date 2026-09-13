@@ -7,10 +7,13 @@ would orphan the receipt at that moment.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -25,6 +28,39 @@ _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}\Z")
 #: The one filename shape `put()` ever writes. Lowercase hex only, and `.fullmatch` below,
 #: so nothing with a prefix, a suffix or a path separator can be mistaken for one of ours.
 _RECEIPT_FILENAME = re.compile(r"sha256-([0-9a-f]{64})\.json")
+
+
+def _fsync_file(fh) -> None:
+    """Force `fh`'s already-written content to durable storage.
+
+    Plain `os.fsync` on darwin only pushes data to the drive's write cache, not the
+    platter — `fcntl.F_FULLFSYNC` is the actual barrier there (see `man fsync` on macOS).
+    `os.fsync` is still called on every platform: it is the correct call everywhere else,
+    and cheap insurance even where `F_FULLFSYNC` is also used.
+    """
+    fh.flush()
+    os.fsync(fh.fileno())
+    if sys.platform == "darwin" and hasattr(fcntl, "F_FULLFSYNC"):
+        # Not every darwin filesystem honours F_FULLFSYNC (e.g. some network mounts); the
+        # plain fsync above already ran, so this is a best-effort upgrade, not the only
+        # line of defense.
+        with contextlib.suppress(OSError):
+            fcntl.fcntl(fh.fileno(), fcntl.F_FULLFSYNC)
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Fsync the directory entry itself.
+
+    `os.replace` can complete while the directory's own metadata update — the new name now
+    pointing at the file — is still only in the page cache. Without this, a crash right
+    after a `put()`/`put_baseline()` call returns can leave the directory listing the old
+    state even though the caller was told the write succeeded.
+    """
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def digest_from_filename(name: str) -> str | None:
@@ -78,25 +114,44 @@ class ReceiptStore(BaseModel):
         return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
     @staticmethod
-    def _atomic_write(path: Path, text: str) -> None:
-        """Write via a unique temp file in the same directory, then os.replace().
+    def _publish(path: Path, populate) -> None:
+        """Write a file into place durably: temp file in the same directory, fill it via
+        `populate(fh)`, fsync it, `os.replace()`, fsync the directory.
+
+        The one helper both `_atomic_write` (a small JSON payload) and `put_baseline` (an
+        arbitrary-sized document copy) go through, so a torn write can't sneak in on either
+        path (F10) and neither publish can be mistaken for durable when it wasn't (F12).
 
         The temp name must be unique per writer, not derived from the target: two concurrent
         writers sharing one temp file interleave into it, and os.replace then publishes the
         garbled result atomically and permanently — worse than the transient truncation this
-        replaced. mkstemp in the same directory keeps os.replace atomic (same filesystem).
+        replaced. mkstemp in the same directory keeps os.replace atomic (same filesystem) and
+        keeps the temp file on the same device as the fsync'd directory.
+
+        `populate` is handed a binary file object opened on the temp file; it must write (or
+        copy) the full content into it. Any exception it raises — or one from `os.replace` —
+        unlinks the temp file before propagating, so a failure never leaves debris, and never
+        leaves a partial file sitting under `path`'s content-addressed name where a later
+        caller would mistake it for a complete one.
         """
         fd, tmp_name = tempfile.mkstemp(
             dir=path.parent, prefix=path.name + ".", suffix=".tmp"
         )
         tmp = Path(tmp_name)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(text)
+            with os.fdopen(fd, "wb") as fh:
+                populate(fh)
+                _fsync_file(fh)
             os.replace(tmp, path)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
+        _fsync_dir(path.parent)
+
+    @staticmethod
+    def _atomic_write(path: Path, text: str) -> None:
+        """Write `text` into place durably. See `_publish`."""
+        ReceiptStore._publish(path, lambda fh: fh.write(text.encode("utf-8")))
 
     def put(self, receipt: Receipt) -> Path:
         self._receipts.mkdir(parents=True, exist_ok=True)
@@ -122,6 +177,14 @@ class ReceiptStore(BaseModel):
         return self.root / "baselines"
 
     def has_baseline(self, baseline_digest: str) -> bool:
+        """Whether a baseline is stored for this digest.
+
+        Trusting mere existence here is safe only because `put_baseline` publishes through
+        `_publish` (F10): the content-addressed name never exists until the full copy has
+        landed and been fsynced, so there is no window where a caller could see a partial
+        file under this name and mistake it for a stored baseline. Verifying the *content*
+        against the digest is `verify`'s T3 job (design §5.2.1), not this store's.
+        """
         return self.baseline_for(baseline_digest) is not None
 
     def baseline_for(self, baseline_digest: str) -> Path | None:
@@ -135,11 +198,23 @@ class ReceiptStore(BaseModel):
         return None
 
     def put_baseline(self, baseline_digest: str, source: Path) -> Path:
-        """Copy a document in as the baseline for its digest. Content-addressed, like receipts."""
+        """Copy a document in as the baseline for its digest. Content-addressed, like receipts.
+
+        Goes through `_publish` (F10): a bare `shutil.copy2` onto the final, content-addressed
+        name means an interrupted copy (disk full, killed process) leaves a partial file right
+        there under the name `baseline_for`/`has_baseline` trust — a corrupt baseline that
+        looks stored and is never retried. Via `_publish`, the destination name only ever
+        appears once the full copy has landed and been fsynced.
+        """
         self.baselines.mkdir(parents=True, exist_ok=True)
         stem = self._filename(baseline_digest).removesuffix(".json")
         dest = self.baselines / (stem + Path(source).suffix.lower())
-        shutil.copy2(source, dest)
+
+        def populate(fh) -> None:
+            with Path(source).open("rb") as src:
+                shutil.copyfileobj(src, fh)
+
+        self._publish(dest, populate)
         return dest
 
     def scan(self) -> StoreScan:

@@ -592,35 +592,29 @@ def test_a_batch_containing_a_no_op_edit_is_refused_whole(server, docx):
 # --- checked_part validates the document actually being edited ---------------------
 
 
-def test_checked_part_validates_the_live_document_not_the_frozen_baseline(
-    server, docx, monkeypatch
-):
+def test_checked_part_validates_the_live_document_not_the_frozen_baseline(server, docx):
     """`checked_part` used to validate against `session.package.parts()` — the frozen
     baseline `SessionRegistry.load` re-verifies at open — while `wml.apply_edits` reads the
-    LIVE document. An out-of-band write that adds a part makes the two genuinely differ, and
-    the membership check has to describe the document actually about to be edited, not the
-    package captured when the session was opened.
+    LIVE document. An out-of-band write that adds a part used to make the two genuinely
+    differ, with `apply_edits` going on to succeed over a part list `checked_part` never
+    actually saw.
+
+    session-durability-02 (F09) closes this earlier and more strongly, as a deliberate
+    contract change: ANY out-of-band change to the live document — adding a harmless part
+    included — makes its digest disagree with replay(baseline + this session's journal), so
+    `apply_edits` now refuses BEFORE `checked_part` is ever reached, rather than silently
+    writing over a document `checked_part`'s own fix exists to keep from being misdescribed.
     """
     sid = session_for(server)
     with zipfile.ZipFile(docx, "a") as zf:
         zf.writestr("custom/extra.xml", b"<root/>")
 
-    seen: list[list[str]] = []
-    real_checked_part = tools_edit.checked_part
-
-    def spy(raw, available):
-        seen.append(sorted(available))
-        return real_checked_part(raw, available)
-
-    monkeypatch.setattr(tools_edit, "checked_part", spy)
-
-    call(server, "apply_edits", {"session_id": sid, "edits": [edit()], "author": "A"})
-
-    assert seen, "checked_part was never called"
-    assert "custom/extra.xml" in seen[-1], (
-        "checked_part must be called with the LIVE document's parts, which now include the "
-        "out-of-band addition, not the session's frozen baseline, which does not"
+    message = refusal(
+        server, "apply_edits", {"session_id": sid, "edits": [edit()], "author": "A"}
     )
+
+    assert sid in message
+    assert "no longer matches" in message
 
 
 def test_result_digest_matches_the_stateless_digest_tool_afterwards(server, docx):
@@ -722,35 +716,40 @@ def insert(server, sid, **kw):
 
 @pytest.mark.parametrize("tool", ["delete_paragraph", "insert_paragraph"])
 def test_the_paragraph_verbs_check_the_part_against_the_live_document(
-    server, docx, monkeypatch, tool
+    server, docx, tool
 ):
-    """Same defect, same fix, at the other two write sites: `delete_paragraph` and
+    """Same defect, same earlier fix, at the other two write sites: `delete_paragraph` and
     `insert_paragraph` used to check `part` against `session.package.parts()` — the frozen
-    baseline — outside the write. Both now check inside `operate()`, against the LIVE
-    package `_write_one` just opened."""
+    baseline — outside the write, then succeed by checking again inside `operate()` against
+    the LIVE package `_write_one` just opened.
+
+    session-durability-02 (F09) now catches an out-of-band write like this one BEFORE either
+    paragraph verb's `operate()` runs at all: replaying this session's (empty) journal onto
+    its baseline no longer reproduces the live document, so the call refuses by name rather
+    than reaching `checked_part` at all — a deliberate contract change, and a strictly
+    earlier refusal than the one this test used to prove.
+    """
     sid = session_for(server)
     with zipfile.ZipFile(docx, "a") as zf:
         zf.writestr("custom/extra.xml", b"<root/>")
 
-    seen: list[list[str]] = []
-    real_checked_part = tools_edit.checked_part
-
-    def spy(raw, available):
-        seen.append(sorted(available))
-        return real_checked_part(raw, available)
-
-    monkeypatch.setattr(tools_edit, "checked_part", spy)
-
-    if tool == "delete_paragraph":
-        delete(server, sid)
-    else:
-        insert(server, sid)
-
-    assert seen, "checked_part was never called"
-    assert "custom/extra.xml" in seen[-1], (
-        "checked_part must be called with the LIVE document's parts, which now include the "
-        "out-of-band addition, not the session's frozen baseline, which does not"
+    params = (
+        {"session_id": sid, "part": DOC, "author": "Ada", "para_id": SECOND}
+        if tool == "delete_paragraph"
+        else {
+            "session_id": sid,
+            "part": DOC,
+            "after_para_id": TITLE,
+            "para_hash": TITLE_HASH,
+            "text": "A new paragraph.",
+            "author": "Ada",
+        }
     )
+
+    message = refusal(server, tool, params)
+
+    assert sid in message
+    assert "no longer matches" in message
 
 
 def test_a_paragraph_verbs_result_digest_matches_the_stateless_digest_tool(

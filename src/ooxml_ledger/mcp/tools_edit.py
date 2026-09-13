@@ -90,6 +90,7 @@ from __future__ import annotations
 
 import secrets
 import shutil
+import tempfile
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -116,7 +117,7 @@ from .deps import (
 from .errors import engine_errors
 from .guards import checked_part, checked_session_id, refuse
 from .journal import WorkingJournal
-from .session import Session, locked, utc_now
+from .session import Session, locked, projected_digest, utc_now
 
 PREVIEW_ANNOTATIONS = ToolAnnotations(
     read_only_hint=True, idempotent_hint=True, open_world_hint=False
@@ -746,6 +747,49 @@ def _journal_ready(session: Session) -> None:
         )
 
 
+def _refuse_if_document_drifted(session: Session, live: Package) -> None:
+    """Refuse, naming the session, when `live` no longer matches what this session's journal
+    accounts for -- BEFORE any edit reaches disk.
+
+    session-durability-02 (F09): `commit_document` was the ONLY place this was ever checked,
+    far too late -- a session left stale by an out-of-band replacement of the document
+    (another session's commit, a hand rollback, a bug in an older build that let two sessions
+    fork over one document) could still write over it. `apply_edits` reported `applied: 1` for
+    a batch that landed on a document its own ledger no longer described, and the caller only
+    learned anything was wrong from a LATER `commit_document` refusal that did not even name
+    the cause.
+
+    `projected_digest` reuses `gate.replay_forward` -- the SAME replay `commit_document`'s own
+    gate runs -- rather than a second implementation that could disagree with it. `live` is
+    whatever this call already opened from the document (so no second unpack), and
+    `session.package` is the session's frozen `pkg/` baseline, already proved by
+    `SessionRegistry.load` to match `meta.baseline_parts`.
+    """
+    journal_read = session.journal.read()
+    live_digest = canon_of_manifest(manifest(live))
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            expected_digest = projected_digest(
+                session.package, journal_read.operations, Path(tmp)
+            )
+        except OoxmlLedgerError as exc:
+            refuse(
+                f"session {session.meta.session_id}: its recorded operations can no longer "
+                f"be replayed against its own baseline ({exc}), so it cannot prove "
+                f"{session.meta.name} still matches what it accounts for. Nothing was "
+                "written. Recover with close_document(session_id="
+                f"{session.meta.session_id!r}, discard=true) and reopen the document."
+            )
+    if live_digest != expected_digest:
+        refuse(
+            f"session {session.meta.session_id}: {session.meta.name} no longer matches what "
+            "this session's journal accounts for -- it changed since this session last wrote "
+            "it, most often because another session committed over it. Nothing was written. "
+            f"Recover with close_document(session_id={session.meta.session_id!r}, "
+            "discard=true) and reopen the document to continue editing its current state."
+        )
+
+
 def _staged_original(document: Path, scratch: Path) -> Path:
     """A copy of the document's CURRENT bytes, kept for the duration of the write.
 
@@ -905,6 +949,7 @@ def _write_one(
     with _scratch(session.root, "apply") as scratch:
         with engine_errors(what):
             pkg = Package.open(document, scratch / "pkg")
+            _refuse_if_document_drifted(session, pkg)
             allocator = wml.allocator_for(pkg)
             operation = operate(pkg, allocator)
             staged = pkg.save(scratch / f"result{pkg.kind}")
@@ -1027,6 +1072,7 @@ def register(server: FastMCP, deps: Deps) -> None:
             with _scratch(session.root, "apply") as scratch:
                 with engine_errors(f"editing {session.meta.name}"):
                     pkg = Package.open(document, scratch / "pkg")
+                    _refuse_if_document_drifted(session, pkg)
                     _checked_edits(pkg, edits)
                     batch = _run_batch(
                         pkg, edits, author=author, at=utc_now(), mode=mode

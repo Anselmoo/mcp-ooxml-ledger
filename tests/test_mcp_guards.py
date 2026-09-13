@@ -600,6 +600,163 @@ def test_a_bool_is_not_an_acceptable_limit():
         checked_limit(True)
 
 
+# --- case-insensitive filesystem identity (F13, F15) -----------------------------
+#
+# Both findings share the same root cause: on a case-preserving, case-insensitive
+# filesystem (APFS), `Path.resolve()` keeps the CALLER's casing for an existing
+# component rather than the on-disk casing, so a purely string-based comparison (`in
+# path.parts`, `root in path.parents`) can diverge from what the filesystem considers
+# the same file. `within_roots` diverging fails CLOSED (an in-root path is refused);
+# `checked_dest`'s store check diverging fails OPEN (a path inside `.ooxml-ledger`
+# under different casing is treated as outside it). Fixed with one shared identity
+# helper, never by loosening the string check itself.
+
+
+def _filesystem_is_case_insensitive(path: pathlib.Path) -> bool:
+    """Probe whether the filesystem holding `path` folds case (APFS default, NTFS),
+    as opposed to a case-sensitive one (ext4 and friends — what this project's CI
+    `ubuntu-latest` runners use). `path` must already exist.
+
+    The case-variant tests below assert something that is only true on a
+    case-insensitive filesystem; on a case-sensitive one the variant is a genuinely
+    different, nonexistent path and MUST be refused, so those tests are skipped
+    there rather than asserting a host-specific property as if it always held.
+    """
+    return path.exists() and pathlib.Path(str(path).upper()).exists()
+
+
+def test_checked_dest_refuses_an_upper_case_store_directory(boundary, root):
+    """F13. `STORE_DIRNAME in path.parts` is case-sensitive, so `.OOXML-LEDGER/...`
+    was NOT recognised as the store even though APFS resolves it to the exact same
+    directory as `.ooxml-ledger/...` (`Path.resolve()` keeps the caller's casing for
+    an existing component, per `within_roots`'s docstring). Without a casefold
+    comparison, this dest sailed past the store guard and `checked_dest` returned a
+    writable path onto a real receipt.
+    """
+    receipts = root / ".ooxml-ledger" / "receipts"
+    receipts.mkdir(parents=True)
+    victim = receipts / ("sha256-" + "a" * 64 + ".json")
+    victim.write_text("PRECIOUS", encoding="utf-8")
+    with pytest.raises(ToolError, match="inside the ledger's own store"):
+        boundary.checked_dest(
+            ".OOXML-LEDGER/receipts/sha256-" + "a" * 64 + ".json", overwrite=True
+        )
+    assert victim.read_text(encoding="utf-8") == "PRECIOUS"
+
+
+def test_checked_dest_refuses_a_mixed_case_store_directory(boundary, root):
+    """F13, same clause, a nastier casing than a uniform upper-case flip."""
+    receipts = root / ".ooxml-ledger" / "receipts"
+    receipts.mkdir(parents=True)
+    victim = receipts / ("sha256-" + "b" * 64 + ".json")
+    victim.write_text("PRECIOUS", encoding="utf-8")
+    with pytest.raises(ToolError, match="inside the ledger's own store"):
+        boundary.checked_dest(
+            ".OoXml-LeDgEr/ReCeIpTs/sha256-" + "b" * 64 + ".json", overwrite=True
+        )
+    assert victim.read_text(encoding="utf-8") == "PRECIOUS"
+
+
+def test_checked_dest_refuses_an_ancestor_that_is_the_store_by_identity(
+    boundary, root, monkeypatch
+):
+    """F13's second, belt-and-braces clause: even when a path component's NAME does not
+    casefold-match `.ooxml-ledger` at all, an ancestor that is the same directory BY
+    IDENTITY (`st_dev`/`st_ino`) as a real store directory must still be refused. The
+    name check alone cannot see this; only comparing identity can.
+    """
+    from ooxml_ledger.ledger.store import STORE_DIRNAME
+
+    store = root / STORE_DIRNAME
+    store.mkdir()
+    alias = root / "not_named_like_the_store"
+    alias.mkdir()
+
+    real_samefile = pathlib.Path.samefile
+
+    def fake_samefile(self, other):
+        # Simulate `alias` and the real store being the identical directory on disk
+        # (e.g. a bind mount) without needing OS-level mount privileges in a test.
+        if {str(self), str(other)} == {str(alias), str(store)}:
+            return True
+        return real_samefile(self, other)
+
+    monkeypatch.setattr(pathlib.Path, "samefile", fake_samefile)
+    with pytest.raises(ToolError, match="inside the ledger's own store"):
+        boundary.checked_dest("not_named_like_the_store/x.json", overwrite=True)
+
+
+def test_within_roots_accepts_a_case_variant_of_an_in_root_path(root):
+    """F15. A document given in a different case than the root was recorded in must
+    still be accepted: it is the exact same file on a case-insensitive filesystem, and
+    refusing it is a false positive, not a security property.
+
+    Only meaningful on a case-insensitive filesystem (APFS, NTFS): CI's `ubuntu-latest`
+    runners use ext4, where the upper-cased variant is a genuinely different,
+    nonexistent path and correctly stays refused — probe first and skip there rather
+    than asserting a host-specific property unconditionally.
+    """
+    if not _filesystem_is_case_insensitive(root):
+        pytest.skip("only meaningful on a case-insensitive filesystem")
+    boundary = Boundary.from_roots([root])
+    upper = pathlib.Path(str(root).upper() + "/doc.docx")
+    assert boundary.within_roots(upper.resolve())
+
+
+def test_checked_document_accepts_a_case_variant_root(boundary, root, document):
+    """F15, through the real caller. Before the fix this raised 'outside the server's
+    roots' for a path `Path.samefile` reports as identical to one already inside.
+
+    The accepted path is not asserted to equal `document.resolve()` byte-for-byte:
+    `Path.resolve()` keeps the caller's casing (see `within_roots`'s docstring), so
+    accepting the path is the fix, not silently re-casing it to match the root.
+
+    Only meaningful on a case-insensitive filesystem — see the sibling test above for
+    why this is skipped, rather than asserted, on CI's case-sensitive `ubuntu-latest`.
+    """
+    if not _filesystem_is_case_insensitive(root):
+        pytest.skip("only meaningful on a case-insensitive filesystem")
+    upper_root = pathlib.Path(str(root).upper())
+    raw = str(upper_root / document.name)
+    accepted = boundary.checked_document(raw)
+    assert accepted.samefile(document)
+
+
+def test_within_roots_still_refuses_a_case_variant_of_a_genuinely_outside_path(
+    boundary, tmp_path
+):
+    """F15's other half: the identity fallback must never loosen containment for a path
+    that is actually outside every root, case games or not."""
+    outside = tmp_path / "OUTSIDE"
+    outside.mkdir()
+    assert not boundary.within_roots(outside.resolve())
+    assert not boundary.within_roots(pathlib.Path(str(outside).lower()))
+
+
+def test_within_roots_still_refuses_a_shorter_path_than_any_root(boundary, tmp_path):
+    """The identity fallback truncates `path` to each root's depth before comparing;
+    a path with fewer components than a root must be skipped, not indexed into."""
+    assert not boundary.within_roots(tmp_path)
+
+
+def test_a_symlink_escape_is_still_refused_with_the_identity_fallback_in_play(
+    boundary, root, tmp_path, document
+):
+    """F15's fallback must not reopen the symlink-escape hole `checked_document` already
+    closes: a resolved path that genuinely lies outside every root stays refused even
+    though the identity fallback now exists."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.docx"
+    secret.write_bytes(document.read_bytes())
+    (root / "escape.docx").symlink_to(secret)
+    with pytest.raises(ToolError, match="outside the server's roots"):
+        boundary.checked_document("escape.docx")
+
+
+# --- startup (F18) -----------------------------------------------------------------
+
+
 def test_the_default_root_is_the_working_directory(tmp_path, monkeypatch):
     """The documented default the whole `checked_dest` threat model rests on, and it had no
     test — the existing one covers only the env-set branch.
