@@ -90,9 +90,12 @@ branch = true
 
 [tool.coverage.report]
 show_missing = true
-# NO fail_under: a threshold picked before a baseline was measured asserts a check
-# nobody ran -- the exact defect this project exists to catch. Measure first
-# (`uv run pytest --cov=src/ooxml_ledger`), then set a floor at/below that value.
+# Set AFTER measuring, never before: a threshold picked without a baseline asserts a check
+# nobody ran -- the exact defect this project exists to catch. Measured 100% line+branch
+# (`uv run pytest --cov=src/ooxml_ledger`, 1630 passed) before this floor was set. A
+# genuinely unreachable line is simplified away or given a `# pragma: no cover` with its
+# reason on the same line -- never covered by a test that asserts nothing.
+fail_under = 100
 exclude_also = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",

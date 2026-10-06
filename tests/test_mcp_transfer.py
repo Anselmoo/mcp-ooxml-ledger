@@ -1031,7 +1031,7 @@ def test_an_inbox_that_is_a_file_is_refused(server, workspace):
     message = refusal(
         server, "import_document", {"name": "x.docx", "content_base64": ""}
     )
-    assert "could not create" in message or "is not a directory" in message
+    assert "exists and is not a directory" in message
 
 
 def test_an_inbox_inside_a_ledger_store_is_refused(workspace):

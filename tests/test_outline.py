@@ -784,7 +784,7 @@ def test_search_reports_a_worksheet_hit_with_no_cell_or_no_cell_reference(tmp_pa
     and a `c` with no `r` attribute (legal — `r` is optional in SpreadsheetML). Both keep the
     sheet name, which is known, and report `ref=None` rather than guessing a position."""
     pkg = _open("xlsx-excel-g2.xlsx", tmp_path)
-    (listed,) = [s for s in sheets(pkg) if s.part == "xl/worksheets/sheet1.xml"]
+    (listed,) = (s for s in sheets(pkg) if s.part == "xl/worksheets/sheet1.xml")
     pkg.write(
         "xl/worksheets/sheet1.xml",
         (

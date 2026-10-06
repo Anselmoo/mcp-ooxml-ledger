@@ -394,10 +394,11 @@ class Boundary(BaseModel):
             )
         try:
             inbox.mkdir(exist_ok=True)
+        except FileExistsError:
+            # `exist_ok=True` only tolerates an existing DIRECTORY; anything else lands here.
+            refuse(f"{inbox} exists and is not a directory")
         except OSError as exc:
             refuse(f"could not create {inbox}: {exc}")
-        if not inbox.is_dir():
-            refuse(f"{inbox} exists and is not a directory")
         resolved = inbox.resolve()
         if not self.within_roots(resolved) or self._is_inside_store(resolved):
             refuse(f"{inbox} resolves outside the server's roots: {self._roots_text()}")
