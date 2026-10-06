@@ -810,3 +810,23 @@ def test_an_unreadable_journal_counts_as_unknown_not_empty(tmp_path):
         "this is not a journal line\n", encoding="utf-8"
     )
     assert _journal_op_count(tmp_path) is None
+
+
+def test_an_orphan_that_cannot_be_stat_ed_is_left_in_place(document, monkeypatch):
+    """No meta.json AND no readable mtime: there is no evidence it is old enough to
+    collect, so the destructive direction is refused and the reason is reported."""
+    from ooxml_ledger.mcp import session as session_module
+
+    orphan = sessions_dir_for(document) / ("b" * 32)
+    orphan.mkdir(parents=True)
+    real_stat = pathlib.Path.stat
+
+    def stat_fails_for_orphan(self, *args, **kwargs):
+        if self == orphan:
+            raise OSError(5, "I/O error")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "stat", stat_fails_for_orphan)
+    assert session_module._orphan_reason(orphan) == (
+        "no meta.json, and the directory could not be stat()ed — left in place"
+    )

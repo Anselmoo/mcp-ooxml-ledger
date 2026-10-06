@@ -319,3 +319,8 @@ def test_two_adjacent_cdata_sections_keep_tight_per_character_extents() -> None:
     assert tm.byte_range(0, 2) == (9, 23)
     assert tm.touches_cdata(1, 1) is True
     assert tm.touches_cdata(2, 2) is False
+
+
+def test_a_character_range_outside_the_text_is_refused():
+    with pytest.raises(ValueError, match="outside"):
+        decode_text(b"abc").byte_range(2, 5)

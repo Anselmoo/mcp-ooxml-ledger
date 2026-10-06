@@ -148,8 +148,6 @@ def _decode(raw: str, cap: int) -> bytes:
     client or a model wrapping long lines actually produces — and the length is bounded BEFORE
     decoding, so an oversized payload is refused without allocating its decoded form.
     """
-    if not isinstance(raw, str):
-        refuse("content_base64 must be a string")
     text = _DATA_URL.sub("", raw.strip(), count=1)
     try:
         packed = _WHITESPACE.sub(b"", text.encode("ascii"))
@@ -229,15 +227,22 @@ def _write_staged(directory: Path, staged: _Staged) -> None:
 
 
 def _sweep_uploads(uploads: Path) -> None:
-    """Remove staged uploads idle for longer than `UPLOAD_TTL_SECONDS`. Best effort."""
-    if not uploads.is_dir():
-        return
+    """Remove staged uploads idle for longer than `UPLOAD_TTL_SECONDS`. Best effort.
+
+    EVERY filesystem probe sits inside the `try`: `Path.is_dir()` re-raises errors other than
+    "not found" (EIO, EACCES), and a housekeeping pass must never turn into a masked failure
+    of the import it runs in front of.
+    """
     cutoff = time.time() - UPLOAD_TTL_SECONDS
-    for child in uploads.iterdir():
-        if not child.is_dir() or child.is_symlink():
-            continue
-        staged = _read_staged(child)
+    try:
+        children = list(uploads.iterdir()) if uploads.is_dir() else []
+    except OSError:
+        return
+    for child in children:
         try:
+            if child.is_symlink() or not child.is_dir():
+                continue
+            staged = _read_staged(child)
             touched = staged.touched if staged else child.stat().st_mtime
         except OSError:
             continue
@@ -273,9 +278,8 @@ def register(server: FastMCP, deps: Deps) -> None:
         """Write base64 bytes into `_inbox/<name>` and return the path for `open_document`."""
         dest = deps.boundary.checked_inbox_dest(name)
         expected_sha = checked_sha256(sha256)
-        if not isinstance(final, bool):
-            refuse(f"final must be a boolean; got {final!r}")
-        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        # `final`/`offset` types are enforced by the tool's input schema before this runs.
+        if offset < 0:
             refuse(f"offset must be a non-negative integer; got {offset!r}")
         cap = deps.transfer_max_bytes
         chunk = _decode(content_base64, cap)
@@ -493,15 +497,13 @@ def register(server: FastMCP, deps: Deps) -> None:
         """Return `document` as an embedded resource, with its receipt."""
         path = deps.boundary.checked_document(document)
         try:
+            # Size first, so an oversized document is refused without being read.
             size = path.stat().st_size
-        except OSError as exc:
-            refuse(f"could not read {path.name}: {exc}")
-        if size > deps.transfer_max_bytes:
-            refuse(
-                f"{path.name} is {size} bytes, over the {deps.transfer_max_bytes}-byte cap "
-                f"({TRANSFER_MAX_BYTES_ENV_VAR})"
-            )
-        try:
+            if size > deps.transfer_max_bytes:
+                refuse(
+                    f"{path.name} is {size} bytes, over the {deps.transfer_max_bytes}-byte "
+                    f"cap ({TRANSFER_MAX_BYTES_ENV_VAR})"
+                )
             data = path.read_bytes()
         except OSError as exc:
             refuse(f"could not read {path.name}: {exc}")

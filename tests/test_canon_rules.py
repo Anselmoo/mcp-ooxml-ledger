@@ -601,3 +601,24 @@ def test_residual_bare_content_inside_pPr_is_a_known_accepted_limitation(payload
     do not revert the change that caused it.
     """
     assert is_default_content("word/endnotes.xml", _endnote_with(payload)) is True
+
+
+def test_a_notes_part_without_boilerplate_notes_is_left_as_is():
+    """W4 only touches separator/continuationSeparator notes; a part with none is unchanged
+    beyond C1."""
+    data = (
+        f'<w:footnotes xmlns:w="{W}"><w:footnote w:id="1"><w:p/></w:footnote></w:footnotes>'
+    ).encode()
+    assert normalize("word/footnotes.xml", data) == data
+
+
+def test_remove_elements_splices_only_the_outermost_of_nested_same_name_spans():
+    """When a rule allows an element to nest inside itself, removing the outer one already
+    removes the inner; splicing both would double-cut the same bytes."""
+    from ooxml_ledger.canon.rules import _remove_elements
+
+    data = b'<r xmlns="u"><a><a/></a><keep/></r>'
+    assert (
+        _remove_elements(data, "{u}a", frozenset({"{u}a"}))
+        == b'<r xmlns="u"><keep/></r>'
+    )

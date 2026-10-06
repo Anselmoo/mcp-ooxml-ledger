@@ -632,7 +632,9 @@ def test_result_digest_matches_the_stateless_digest_tool_afterwards(server, docx
     assert body["result_digest"] == afterwards["digest"]
 
 
-def test_a_restat_failure_after_a_successful_write_is_swallowed_by_design(server, docx):
+def test_a_restat_failure_after_a_successful_write_is_swallowed_by_design(
+    deny_writes, server, docx
+):
     """`_restat` re-stats the document and rewrites `meta.json` after a successful write.
     Its failure is swallowed BY DESIGN — see `_restat`'s docstring — because the document
     and the journal have both already landed, so refusing there would report a failure that
@@ -642,15 +644,12 @@ def test_a_restat_failure_after_a_successful_write_is_swallowed_by_design(server
     """
     sid = session_for(server)
     meta_path = sessions_dir_for(docx) / sid / "meta.json"
-    meta_path.chmod(0o444)
-    try:
+    with deny_writes(meta_path):
         body = call(
             server,
             "apply_edits",
             {"session_id": sid, "edits": [edit()], "author": "A", "mode": "direct"},
         ).structured_content
-    finally:
-        meta_path.chmod(0o644)
 
     assert body["applied"] == 1
     assert journal_text(docx, sid).strip(), "the operation must still reach the journal"

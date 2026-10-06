@@ -306,3 +306,129 @@ def test_darwin_without_fcntl_still_fsyncs(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "fsync", lambda fd: synced.append(fd) or real_fsync(fd))
     _fsync_once(tmp_path)
     assert len(synced) == 1
+
+
+# --- receipt-format-v2: import records and provenance lineage --------------------------
+
+
+def _provenance(digest="a", name="up.docx"):
+    from ooxml_ledger.ledger.chain import provenance_hash
+    from ooxml_ledger.ledger.models import Provenance
+
+    body = {
+        "origin": "import",
+        "via": "import_document",
+        "name": name,
+        "imported_at": "2026-10-06T10:00:00Z",
+        "tool": "t",
+        "digest": "sha256:" + digest * 64,
+        "sha256": "sha256:" + "c" * 64,
+        "size": 1,
+        "chunks": 1,
+    }
+    return Provenance.model_validate({**body, "hash": provenance_hash(body)})
+
+
+def _store(tmp_path):
+    return ReceiptStore.for_document(tmp_path / "m.docx")
+
+
+def test_an_import_record_round_trips_and_the_first_one_wins(tmp_path):
+    store = _store(tmp_path)
+    first = _provenance(name="first.docx")
+    store.put_import(first)
+    store.put_import(_provenance(name="second.docx"))
+    assert store.get_import(first.digest) == first
+
+
+def test_a_missing_import_record_is_none(tmp_path):
+    assert _store(tmp_path).get_import("sha256:" + "a" * 64) is None
+
+
+def test_an_unreadable_import_record_is_ignored(tmp_path):
+    store = _store(tmp_path)
+    path = store.put_import(_provenance())
+    path.write_text("{not json")
+    assert store.get_import(_provenance().digest) is None
+
+
+def test_an_import_record_under_the_wrong_digest_is_ignored(tmp_path):
+    store = _store(tmp_path)
+    path = store.put_import(_provenance("a"))
+    shutil.copy(path, path.with_name("sha256-" + "b" * 64 + ".json"))
+    assert store.get_import("sha256:" + "b" * 64) is None
+
+
+def test_a_tampered_import_record_is_ignored(tmp_path):
+    store = _store(tmp_path)
+    path = store.put_import(_provenance())
+    raw = json.loads(path.read_text())
+    raw["name"] = "planted.docx"
+    path.write_text(json.dumps(raw))
+    assert store.get_import(_provenance().digest) is None
+
+
+def _v2_receipt(result="b", provenance=None):
+    from ooxml_ledger.ledger.models import SCHEMA_V2
+
+    base = _receipt(result).model_dump(mode="json", by_alias=True)
+    base["schema"] = SCHEMA_V2
+    base["provenance"] = (provenance or _provenance()).model_dump(mode="json")
+    return Receipt.model_validate(base)
+
+
+def test_provenance_is_inherited_through_a_receipt_lineage(tmp_path):
+    store = _store(tmp_path)
+    receipt = _v2_receipt()
+    store.put(receipt)
+    assert store.provenance_for(receipt.result.digest) == receipt.provenance
+
+
+def test_no_provenance_without_an_import_or_a_receipt(tmp_path):
+    assert _store(tmp_path).provenance_for("sha256:" + "b" * 64) is None
+
+
+def test_a_v1_receipt_passes_on_no_provenance(tmp_path):
+    store = _store(tmp_path)
+    store.put(_receipt())
+    assert store.provenance_for("sha256:" + "b" * 64) is None
+
+
+def test_an_unreadable_receipt_passes_on_no_provenance(tmp_path):
+    store = _store(tmp_path)
+    path = store.put(_v2_receipt())
+    path.write_text("{broken")
+    assert store.provenance_for("sha256:" + "b" * 64) is None
+
+
+def test_a_mislabelled_receipt_passes_on_no_provenance(tmp_path):
+    store = _store(tmp_path)
+    path = store.put(_v2_receipt("b"))
+    shutil.copy(path, path.with_name("sha256-" + "e" * 64 + ".json"))
+    assert store.provenance_for("sha256:" + "e" * 64) is None
+
+
+def test_tampered_receipt_provenance_is_not_inherited(tmp_path):
+    store = _store(tmp_path)
+    path = store.put(_v2_receipt())
+    raw = json.loads(path.read_text())
+    raw["provenance"]["name"] = "planted.docx"
+    path.write_text(json.dumps(raw))
+    assert store.provenance_for("sha256:" + "b" * 64) is None
+
+
+def test_publish_new_never_replaces_and_leaves_no_temp_file(tmp_path):
+    target = tmp_path / "doc.docx"
+    ReceiptStore.publish_new(target, lambda fh: fh.write(b"first"))
+    with pytest.raises(FileExistsError):
+        ReceiptStore.publish_new(target, lambda fh: fh.write(b"second"))
+    assert target.read_bytes() == b"first"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["doc.docx"]
+
+
+def test_a_baseline_lookup_skips_a_directory_with_a_baseline_name(tmp_path):
+    store = _store(tmp_path)
+    digest = "sha256:" + "a" * 64
+    store.baselines.mkdir(parents=True)
+    (store.baselines / ("sha256-" + "a" * 64 + ".docx")).mkdir()
+    assert store.baseline_for(digest) is None

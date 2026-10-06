@@ -665,3 +665,397 @@ def test_cli_verify_prints_the_provenance_line_and_still_exits_zero(server):
     result = CliRunner().invoke(app, ["verify", str(document)])
     assert result.exit_code == 0, result.output
     assert "PROVENANCE  imported via import_document as 'upload.docx'" in result.output
+
+
+# --- the remaining refusals and failure paths, each named rather than masked -----------
+
+
+def _start(server, name="x.docx", data=b"PK\x03\x04"):
+    return call(
+        server,
+        "import_document",
+        {"name": name, "content_base64": b64(data), "final": False},
+    ).structured_content
+
+
+def _uploads(workspace) -> Path:
+    return workspace / "_inbox" / ".ooxml-ledger" / "uploads"
+
+
+def test_a_negative_offset_is_refused(server):
+    message = refusal(
+        server,
+        "import_document",
+        {"name": "x.docx", "content_base64": "", "offset": -1},
+    )
+    assert "non-negative" in message
+
+
+def test_a_single_call_import_must_start_at_offset_zero(server):
+    _, data = corpus("docx")
+    message = refusal(
+        server,
+        "import_document",
+        {"name": "x.docx", "content_base64": b64(data), "offset": 5},
+    )
+    assert "offset must be 0 for a single-call import" in message
+
+
+def test_the_first_chunk_must_start_at_offset_zero(server):
+    message = refusal(
+        server,
+        "import_document",
+        {"name": "x.docx", "content_base64": b64(b"PK"), "final": False, "offset": 5},
+    )
+    assert "starts at offset 0" in message
+
+
+def test_a_malformed_upload_id_is_refused(server):
+    message = refusal(
+        server,
+        "import_document",
+        {"name": "x.docx", "content_base64": "", "upload_id": "../../etc"},
+    )
+    assert "not an upload id" in message
+
+
+def test_a_malformed_sha256_is_refused(server):
+    message = refusal(
+        server,
+        "import_document",
+        {"name": "x.docx", "content_base64": "", "sha256": "md5:abc"},
+    )
+    assert "not a sha256" in message
+
+
+def test_a_bare_hex_sha256_is_accepted(server):
+    _, data = corpus("docx")
+    body = call(
+        server,
+        "import_document",
+        {
+            "name": "x.docx",
+            "content_base64": b64(data),
+            "sha256": hashlib.sha256(data).hexdigest().upper(),
+        },
+    ).structured_content
+    assert body["sha256"] == sha(data)
+
+
+def test_a_payload_a_few_bytes_over_the_cap_is_refused_after_decoding(workspace):
+    """The pre-decode bound is in base64 quanta, so up to two bytes over the cap decode;
+    the decoded length is then checked exactly."""
+    small = create_server(roots=[workspace], transfer_max_bytes=1000)
+    message = refusal(
+        small, "import_document", {"name": "x.docx", "content_base64": b64(b"P" * 1002)}
+    )
+    assert "1002 bytes, over the 1000-byte cap" in message
+
+
+def test_staging_an_upload_refuses_readably_when_the_directory_cannot_be_made(
+    server, monkeypatch
+):
+    real = Path.mkdir
+
+    def broken(self, *args, **kwargs):
+        if self.parent.name == "uploads":
+            raise OSError(28, "No space left on device")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", broken)
+    message = refusal(
+        server,
+        "import_document",
+        {"name": "x.docx", "content_base64": b64(b"PK"), "final": False},
+    )
+    assert "could not stage upload for x.docx" in message
+
+
+def test_a_damaged_staged_upload_is_refused(server, workspace):
+    first = _start(server)
+    (_uploads(workspace) / first["upload_id"] / "meta.json").write_text("{not json")
+    message = refusal(
+        server,
+        "import_document",
+        {
+            "name": "x.docx",
+            "content_base64": b64(b"K"),
+            "final": False,
+            "upload_id": first["upload_id"],
+            "offset": 4,
+        },
+    )
+    assert "is damaged" in message
+
+
+def test_a_chunk_arriving_while_another_is_written_is_refused(server, workspace):
+    import fcntl
+
+    first = _start(server)
+    with (_uploads(workspace) / first["upload_id"] / ".lock").open("a+") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+        message = refusal(
+            server,
+            "import_document",
+            {
+                "name": "x.docx",
+                "content_base64": b64(b"K"),
+                "final": False,
+                "upload_id": first["upload_id"],
+                "offset": 4,
+            },
+        )
+    assert "being written right now" in message
+
+
+def test_an_upload_whose_lock_cannot_be_opened_is_refused(server, monkeypatch):
+    first = _start(server)
+    real = Path.open
+
+    def broken(self, mode="r", *args, **kwargs):
+        if self.name == ".lock":
+            raise OSError(24, "Too many open files")
+        return real(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", broken)
+    message = refusal(
+        server,
+        "import_document",
+        {
+            "name": "x.docx",
+            "content_base64": b64(b"K"),
+            "final": False,
+            "upload_id": first["upload_id"],
+            "offset": 4,
+        },
+    )
+    assert "could not lock upload" in message
+
+
+def test_a_chunk_that_cannot_be_written_is_refused(server, monkeypatch):
+    first = _start(server)
+    real = Path.open
+
+    def broken(self, mode="r", *args, **kwargs):
+        if self.name == "data.part":
+            raise OSError(28, "No space left on device")
+        return real(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", broken)
+    message = refusal(
+        server,
+        "import_document",
+        {
+            "name": "x.docx",
+            "content_base64": b64(b"K"),
+            "final": False,
+            "upload_id": first["upload_id"],
+            "offset": 4,
+        },
+    )
+    assert "could not stage chunk" in message
+
+
+def test_a_refused_chunked_finalise_discards_the_staged_upload(server, workspace):
+    _, data = corpus("docx")
+    first = call(
+        server,
+        "import_document",
+        {"name": "x.docx", "content_base64": b64(data[:100]), "final": False},
+    ).structured_content
+    message = refusal(
+        server,
+        "import_document",
+        {
+            "name": "x.docx",
+            "content_base64": b64(data[100:]),
+            "upload_id": first["upload_id"],
+            "offset": 100,
+            "sha256": "0" * 64,
+        },
+    )
+    assert "sha256 mismatch" in message
+    assert not (_uploads(workspace) / first["upload_id"]).exists()
+
+
+def test_the_sweep_skips_what_is_not_a_staged_upload(server, workspace, tmp_path):
+    first = _start(server)
+    uploads = _uploads(workspace)
+    (uploads / "stray-file").write_text("x")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (uploads / "linked").symlink_to(elsewhere)
+    damaged = uploads / ("d" * 32)
+    damaged.mkdir()
+    # Damaged meta, but a fresh directory: the sweep falls back to its mtime and keeps it.
+    _start(server, name="y.docx")
+    assert (uploads / "stray-file").exists()
+    assert elsewhere.exists()
+    assert damaged.exists()
+    assert (uploads / first["upload_id"]).exists()
+
+
+def test_the_sweep_skips_an_upload_it_cannot_stat(server, workspace, monkeypatch):
+    first = _start(server)
+    staged = _uploads(workspace) / first["upload_id"]
+    (staged / "meta.json").unlink()
+    real = Path.stat
+
+    def broken(self, *args, **kwargs):
+        if self == staged:
+            raise OSError(5, "I/O error")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", broken)
+    _start(server, name="y.docx")
+    monkeypatch.undo()
+    assert staged.exists()
+
+
+def test_import_refuses_readably_when_the_inbox_store_cannot_be_made(
+    server, workspace, monkeypatch
+):
+    real = Path.mkdir
+
+    def broken(self, *args, **kwargs):
+        if self.name == ".ooxml-ledger" and self.parent.name == "_inbox":
+            raise OSError(13, "Permission denied")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", broken)
+    _, data = corpus("docx")
+    message = refusal(
+        server, "import_document", {"name": "x.docx", "content_base64": b64(data)}
+    )
+    assert "could not prepare" in message
+
+
+def test_a_publish_race_with_identical_bytes_is_already_present(server, monkeypatch):
+    """The name was free at the pre-check and taken at publish time by the same bytes."""
+    _, data = corpus("docx")
+
+    def racing(path, populate):
+        path.write_bytes(data)
+        raise FileExistsError(17, "File exists", str(path))
+
+    monkeypatch.setattr(ReceiptStore, "publish_new", staticmethod(racing))
+    body = import_one(server, "race.docx", data)
+    assert body["already_present"] is True
+
+
+def test_a_publish_race_with_different_bytes_is_refused(server, monkeypatch):
+    _, data = corpus("docx")
+
+    def racing(path, populate):
+        path.write_bytes(b"someone else")
+        raise FileExistsError(17, "File exists", str(path))
+
+    monkeypatch.setattr(ReceiptStore, "publish_new", staticmethod(racing))
+    message = refusal(
+        server, "import_document", {"name": "race.docx", "content_base64": b64(data)}
+    )
+    assert "already exists in the inbox with different content" in message
+
+
+def test_a_publish_that_fails_is_refused_readably(server, monkeypatch):
+    def full(path, populate):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(ReceiptStore, "publish_new", staticmethod(full))
+    _, data = corpus("docx")
+    message = refusal(
+        server, "import_document", {"name": "x.docx", "content_base64": b64(data)}
+    )
+    assert "could not import x.docx" in message
+
+
+def test_an_unhashable_existing_file_counts_as_different(
+    server, workspace, monkeypatch
+):
+    from ooxml_ledger.mcp import tools_transfer
+
+    name, data = corpus("docx")
+    import_one(server, name, data)
+
+    def broken(path):
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(tools_transfer, "_file_sha256", broken)
+    message = refusal(
+        server, "import_document", {"name": name, "content_base64": b64(data)}
+    )
+    assert "already exists" in message
+
+
+def test_export_refuses_readably_when_the_document_cannot_be_read(
+    server, docx, monkeypatch
+):
+    def broken(self):
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(Path, "read_bytes", broken)
+    message = refusal(
+        server, "export_document", {"document": "ms.docx", "require_receipt": False}
+    )
+    assert "could not read ms.docx" in message
+
+
+def test_export_refuses_when_the_stored_receipt_is_unreadable(server, docx):
+    digest = call(server, "digest", {"document": "ms.docx"}).structured_content[
+        "digest"
+    ]
+    receipts = docx.parent / ".ooxml-ledger" / "receipts"
+    receipts.mkdir(parents=True)
+    (receipts / (digest.replace(":", "-") + ".json")).write_text("{broken")
+    message = refusal(server, "export_document", {"document": "ms.docx"})
+    assert "could not be read" in message
+
+
+def test_an_inbox_that_cannot_be_created_is_refused(server, monkeypatch):
+    real = Path.mkdir
+
+    def broken(self, *args, **kwargs):
+        if self.name == "_inbox":
+            raise OSError(30, "Read-only file system")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", broken)
+    message = refusal(
+        server, "import_document", {"name": "x.docx", "content_base64": ""}
+    )
+    assert "could not create" in message
+
+
+def test_an_inbox_that_is_a_file_is_refused(server, workspace):
+    (workspace / "_inbox").write_text("not a directory")
+    message = refusal(
+        server, "import_document", {"name": "x.docx", "content_base64": ""}
+    )
+    assert "could not create" in message or "is not a directory" in message
+
+
+def test_an_inbox_inside_a_ledger_store_is_refused(workspace):
+    store_root = workspace / ".ooxml-ledger"
+    store_root.mkdir()
+    inside = create_server(roots=[store_root])
+    message = refusal(
+        inside, "import_document", {"name": "x.docx", "content_base64": ""}
+    )
+    assert "outside the server's roots" in message
+
+
+def test_the_sweep_gives_up_quietly_when_the_uploads_directory_cannot_be_listed(
+    server, workspace, monkeypatch
+):
+    _start(server)
+    uploads = _uploads(workspace)
+    real = Path.iterdir
+
+    def broken(self):
+        if self == uploads:
+            raise OSError(5, "I/O error")
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", broken)
+    body = _start(server, name="y.docx")
+    assert body["complete"] is False

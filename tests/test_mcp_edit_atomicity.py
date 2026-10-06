@@ -101,7 +101,7 @@ def insert_params(sid):
     ],
 )
 def test_a_verb_rolls_the_document_back_when_the_journal_cannot_be_written(
-    server, docx, tool, params
+    deny_writes, server, docx, tool, params
 ):
     """THE blocker, one test per writing verb.
 
@@ -114,11 +114,8 @@ def test_a_verb_rolls_the_document_back_when_the_journal_cannot_be_written(
     """
     sid = session_for(server)
     before = docx.read_bytes()
-    journal_path(docx, sid).chmod(0o444)
-    try:
+    with deny_writes(journal_path(docx, sid)):
         message = refusal(server, tool, params(sid))
-    finally:
-        journal_path(docx, sid).chmod(0o644)
 
     assert "could not be recorded" in message, message
     assert "rolled back" in message, message
@@ -129,7 +126,7 @@ def test_a_verb_rolls_the_document_back_when_the_journal_cannot_be_written(
     assert scratch_leftovers(docx, sid) == []
 
 
-def test_a_rolled_back_session_can_still_be_committed(server, docx):
+def test_a_rolled_back_session_can_still_be_committed(deny_writes, server, docx):
     """The point of rolling back rather than merely reporting: the session stays USABLE.
 
     An unrecorded-but-applied edit poisoned the session permanently — every later
@@ -137,11 +134,8 @@ def test_a_rolled_back_session_can_still_be_committed(server, docx):
     rollback the document and the journal agree again, so an ordinary commit passes.
     """
     sid = session_for(server)
-    journal_path(docx, sid).chmod(0o444)
-    try:
+    with deny_writes(journal_path(docx, sid)):
         refusal(server, "apply_edits", apply_params(sid))
-    finally:
-        journal_path(docx, sid).chmod(0o644)
 
     call(server, "apply_edits", apply_params(sid))
     committed = call(server, "commit_document", {"session_id": sid}).structured_content
@@ -176,7 +170,7 @@ def test_a_verb_refuses_when_the_rollback_copy_cannot_be_staged(
 
 
 def test_when_the_document_cannot_be_restored_after_a_failed_append_it_says_so(
-    server, docx, monkeypatch
+    deny_writes, server, docx, monkeypatch
 ):
     """`_undo`'s WORST case: the journal append fails AND the compensating rollback's
     own `original.replace(document)` also fails. The document is left holding edited
@@ -196,11 +190,8 @@ def test_when_the_document_cannot_be_restored_after_a_failed_append_it_says_so(
 
     monkeypatch.setattr(Path, "replace", flaky_replace)
 
-    journal_path(docx, sid).chmod(0o444)
-    try:
+    with deny_writes(journal_path(docx, sid)):
         message = refusal(server, "apply_edits", apply_params(sid))
-    finally:
-        journal_path(docx, sid).chmod(0o644)
 
     assert "COULD NOT BE RESTORED" in message, message
     assert "commit_document and verify will refuse" in message, message
@@ -413,7 +404,7 @@ def test_apply_edits_refuses_while_commit_document_holds_the_lock(
     ],
 )
 def test_a_verb_refuses_readably_when_the_document_cannot_be_replaced(
-    server, docx, tool, params
+    deny_writes, server, docx, tool, params
 ):
     """`Path.replace` onto a read-only directory raises EACCES.
 
@@ -423,11 +414,8 @@ def test_a_verb_refuses_readably_when_the_document_cannot_be_replaced(
     """
     sid = session_for(server)
     before = docx.read_bytes()
-    docx.parent.chmod(0o555)
-    try:
+    with deny_writes(docx.parent):
         message = refusal(server, tool, params(sid))
-    finally:
-        docx.parent.chmod(0o755)
 
     assert "could not write" in message, message
     assert docx.name in message, message

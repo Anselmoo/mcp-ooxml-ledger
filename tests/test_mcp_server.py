@@ -223,3 +223,16 @@ def test_the_transfer_cap_is_read_from_the_environment(monkeypatch, tmp_path):
     info = call(create_server(roots=[tmp_path]), "server_info").structured_content
     assert info["transfer_max_bytes"] == 4096
     assert info["receipt_schemas"] == ["ooxml-ledger/1", "ooxml-ledger/2"]
+
+
+def test_supported_suffixes_lists_every_container():
+    from ooxml_ledger.mcp.server import supported_suffixes
+
+    assert supported_suffixes() == [
+        ".docx",
+        ".dotx",
+        ".potx",
+        ".pptx",
+        ".xlsm",
+        ".xlsx",
+    ]

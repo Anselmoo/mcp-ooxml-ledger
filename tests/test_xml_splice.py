@@ -77,3 +77,8 @@ def test_reversed_range_is_rejected():
     """A reversed splice would silently duplicate bytes rather than fail."""
     with pytest.raises(ValueError, match="end must be >= start"):
         Splice(start=8, end=2, replacement=b"Y")
+
+
+def test_a_negative_start_is_refused():
+    with pytest.raises(ValueError, match="start must be >= 0"):
+        Splice(start=-1, end=0, replacement=b"")
