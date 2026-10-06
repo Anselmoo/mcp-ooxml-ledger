@@ -43,7 +43,7 @@ from ..core.errors import GateFailure
 from ..core.pkg import Package
 from ..gate import attestation_for, gate
 from ..ledger.chain import first_break
-from ..ledger.models import SCHEMA_VERSION, Receipt
+from ..ledger.models import SCHEMA_V1, SCHEMA_V2, SCHEMA_VERSION, Receipt
 from ..ledger.store import ReceiptStore
 from .deps import (
     ACCIDENT_EVIDENT_CAVEAT,
@@ -101,10 +101,19 @@ class CommitReport(BaseModel):
     #: `gate`. Dropping them here would rebuild, one layer up, exactly the hole the CLI's
     #: `NOTE` line closed.
     notices: list[str]
+    #: The receipt schema written: `ooxml-ledger/1`, or `ooxml-ledger/2` when the session's
+    #: baseline descends from an `import_document` (receipt-format-v2).
+    receipt_schema: str
+    #: The receipt-format-v2 provenance block sealed into the receipt, or None. Reported
+    #: here, NOT folded into `notices`: `attestation_for` re-derives `notices` from the
+    #: operations and refuses on any mismatch.
+    provenance: dict | None = None
     caveat: str
 
 
-def _journal_problems(journal_read: JournalRead, name: str) -> str | None:
+def _journal_problems(
+    journal_read: JournalRead, name: str, genesis: str | None = None
+) -> str | None:
     """The session-level prechecks on the ledger itself. Returns a refusal, or None.
 
     Deliberately NOT part of the gate. `gate()` cannot do the chain check — the Word engine
@@ -117,7 +126,7 @@ def _journal_problems(journal_read: JournalRead, name: str) -> str | None:
             f"the working journal of {name} ends in a truncated line, so the recorded "
             "operation list is incomplete and cannot account for anything"
         )
-    broken_at = first_break(journal_read.operations)
+    broken_at = first_break(journal_read.operations, genesis=genesis)
     if broken_at is not None:
         return (
             f"the recorded operation hash chain of {name} does not recompute: it first "
@@ -167,7 +176,7 @@ def register(server: FastMCP, deps: Deps) -> None:
             )
 
         journal = session.journal.read()
-        problem = _journal_problems(journal, session.meta.name)
+        problem = _journal_problems(journal, session.meta.name, session.genesis)
         if problem is not None:
             refuse(f"commit refused — {problem}. Nothing was written." + NOT_FORCEABLE)
 
@@ -217,9 +226,11 @@ def register(server: FastMCP, deps: Deps) -> None:
                     )
                 )
 
+            provenance = session.meta.provenance
+            receipt_schema = SCHEMA_V1 if provenance is None else SCHEMA_V2
             receipt = Receipt.model_validate(
                 {
-                    "schema": SCHEMA_VERSION,
+                    "schema": receipt_schema,
                     "document": {"name": document.name, "kind": session.meta.kind},
                     "baseline": {
                         "canon": CANON_VERSION,
@@ -232,6 +243,11 @@ def register(server: FastMCP, deps: Deps) -> None:
                     "result": {"digest": result_digest, "parts": result_parts},
                     "attestation": attestation.model_dump(mode="json"),
                     "signature": None,
+                    **(
+                        {}
+                        if provenance is None
+                        else {"provenance": provenance.model_dump(mode="json")}
+                    ),
                 }
             )
 
@@ -251,5 +267,11 @@ def register(server: FastMCP, deps: Deps) -> None:
             visibility=verdict.visibility,
             structural=verdict.structural,
             notices=list(verdict.notices),
+            receipt_schema=receipt.schema_,
+            provenance=(
+                None
+                if receipt.provenance is None
+                else receipt.provenance.model_dump(mode="json")
+            ),
             caveat=ACCIDENT_EVIDENT_CAVEAT,
         )

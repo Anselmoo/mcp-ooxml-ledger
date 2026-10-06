@@ -18,7 +18,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from .models import Receipt
+from .chain import provenance_hash
+from .models import Provenance, Receipt
 
 STORE_DIRNAME = ".ooxml-ledger"
 # \Z, not $ — see the identical pattern in ledger/models.py for why.
@@ -156,6 +157,27 @@ class ReceiptStore(BaseModel):
         _fsync_dir(path.parent)
 
     @staticmethod
+    def publish_new(path: Path, populate) -> None:
+        """Like `_publish`, but never replaces an existing `path`: raises `FileExistsError`.
+
+        `os.link` is the atomic no-clobber primitive — it fails if the name exists, and the
+        name only ever appears once the temp file is complete and fsynced. Used where an
+        overwrite would silently swap a document out from under its own receipts.
+        """
+        fd, tmp_name = tempfile.mkstemp(
+            dir=path.parent, prefix="." + path.name + ".", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                populate(fh)
+                _fsync_file(fh)
+            os.link(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        _fsync_dir(path.parent)
+
+    @staticmethod
     def _atomic_write(path: Path, text: str) -> None:
         """Write `text` into place durably. See `_publish`."""
         ReceiptStore._publish(path, lambda fh: fh.write(text.encode("utf-8")))
@@ -224,6 +246,65 @@ class ReceiptStore(BaseModel):
         self._publish(dest, populate)
         return dest
 
+    @property
+    def imports(self) -> Path:
+        return self.root / "imports"
+
+    def put_import(self, provenance: Provenance) -> Path:
+        """Record that `provenance.digest` entered the system through `import_document`.
+
+        Content-addressed by the imported digest and never overwritten: the EARLIEST import
+        of a given package is its provenance, and a later re-import of identical bytes must
+        not rewrite when or under what name that happened.
+        """
+        self.imports.mkdir(parents=True, exist_ok=True)
+        path = self.imports / self._filename(provenance.digest)
+        payload = provenance.model_dump(mode="json")
+        text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        with contextlib.suppress(FileExistsError):
+            self.publish_new(path, lambda fh: fh.write(text.encode("utf-8")))
+        return path
+
+    def get_import(self, digest: str) -> Provenance | None:
+        """The import record for `digest`, or None if absent, unreadable or not self-consistent.
+
+        An import record whose hash does not recompute is IGNORED rather than trusted: an
+        edited record must not be able to plant provenance a later receipt would then seal.
+        """
+        path = self.imports / self._filename(digest)
+        if not path.is_file():
+            return None
+        try:
+            provenance = Provenance.model_validate_json(
+                path.read_text(encoding="utf-8")
+            )
+        except (ValueError, OSError, UnicodeDecodeError):
+            return None
+        if provenance.digest != digest or not provenance_is_intact(provenance):
+            return None
+        return provenance
+
+    def provenance_for(self, digest: str) -> Provenance | None:
+        """The provenance a session whose baseline is `digest` inherits, or None.
+
+        Either `digest` was itself imported (an import record), or it is the result of an
+        earlier receipt that carried provenance — lineage: a document that began as model-
+        supplied bytes does not become user-supplied by being committed once and reopened.
+        """
+        imported = self.get_import(digest)
+        if imported is not None:
+            return imported
+        try:
+            receipt = self.find(digest)
+        except (ValueError, OSError, UnicodeDecodeError):
+            return None
+        if receipt is None or receipt.result.digest != digest:
+            return None
+        provenance = receipt.provenance
+        if provenance is None or not provenance_is_intact(provenance):
+            return None
+        return provenance
+
     def scan(self) -> StoreScan:
         """Every well-formed receipt in the store, plus a reason for each file left out.
 
@@ -270,3 +351,9 @@ class ReceiptStore(BaseModel):
             if digest is not None:
                 out.append(digest)
         return out
+
+
+def provenance_is_intact(provenance: Provenance) -> bool:
+    """Whether `provenance.hash` recomputes over the rest of the block (receipt-format-v2 §3)."""
+    payload = provenance.model_dump(mode="json", exclude={"hash"})
+    return provenance_hash(payload) == provenance.hash

@@ -190,6 +190,36 @@ def test_main_runs_the_server_when_the_roots_are_valid(monkeypatch):
         def run(self):
             ran.append(True)
 
-    monkeypatch.setattr(server_mod, "create_server", lambda read_only=False: _Fake())
+    monkeypatch.setattr(server_mod, "create_server", lambda **_kwargs: _Fake())
     server_mod.main()
     assert ran == [True]
+
+
+def test_an_invalid_transfer_cap_exits_cleanly_naming_the_variable(
+    monkeypatch, tmp_path, capsys
+):
+    """A typo'd `OOXML_LEDGER_IMPORT_MAX_BYTES` must refuse to start, not silently restore
+    the default cap the operator meant to change."""
+    from ooxml_ledger.mcp.server import main
+
+    monkeypatch.setenv("OOXML_LEDGER_ROOTS", str(tmp_path))
+    monkeypatch.setenv("OOXML_LEDGER_IMPORT_MAX_BYTES", "25MB")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+
+    assert excinfo.value.code != 0
+    captured = capsys.readouterr()
+    assert "OOXML_LEDGER_IMPORT_MAX_BYTES" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_the_transfer_cap_is_read_from_the_environment(monkeypatch, tmp_path):
+    from mcp_harness import call
+
+    from ooxml_ledger.mcp.server import create_server
+
+    monkeypatch.setenv("OOXML_LEDGER_IMPORT_MAX_BYTES", "4096")
+    info = call(create_server(roots=[tmp_path]), "server_info").structured_content
+    assert info["transfer_max_bytes"] == 4096
+    assert info["receipt_schemas"] == ["ooxml-ledger/1", "ooxml-ledger/2"]

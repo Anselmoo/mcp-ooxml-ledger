@@ -246,3 +246,56 @@ def test_digest_rejects_a_trailing_newline():
     """
     with pytest.raises(ValidationError):
         Snapshot(canon="ooxml-canon/1", digest="sha256:" + "a" * 64 + "\n")
+
+
+# --- receipt-format-v2: provenance -------------------------------------------------
+
+
+def _provenance():
+    from ooxml_ledger.ledger.chain import provenance_hash
+
+    body = {
+        "origin": "import",
+        "via": "import_document",
+        "name": "upload.docx",
+        "imported_at": "2026-10-06T10:00:00Z",
+        "tool": "t",
+        "digest": "sha256:" + "a" * 64,
+        "sha256": "sha256:" + "c" * 64,
+        "size": 10,
+        "chunks": 1,
+    }
+    return body | {"hash": provenance_hash(body)}
+
+
+def test_a_v2_receipt_round_trips_with_its_provenance():
+    r = Receipt.model_validate(
+        _receipt(schema="ooxml-ledger/2", provenance=_provenance())
+    )
+    dumped = r.model_dump(mode="json", by_alias=True)
+    assert dumped["provenance"]["origin"] == "import"
+    assert Receipt.model_validate(dumped) == r
+    assert r.chain_genesis == _provenance()["hash"]
+
+
+def test_a_v1_receipt_serialises_without_a_provenance_key():
+    """Not even `null`: every model is extra="forbid", so a v0.3.0 verifier would reject it."""
+    r = Receipt.model_validate(_receipt())
+    assert "provenance" not in r.model_dump(mode="json", by_alias=True)
+    assert "provenance" not in r.model_dump_json(by_alias=True)
+    assert r.chain_genesis is None
+
+
+def test_a_v1_receipt_carrying_provenance_is_refused():
+    with pytest.raises(ValidationError, match="cannot carry provenance"):
+        Receipt.model_validate(_receipt(provenance=_provenance()))
+
+
+def test_a_v2_receipt_without_provenance_is_refused():
+    with pytest.raises(ValidationError, match="MUST carry provenance"):
+        Receipt.model_validate(_receipt(schema="ooxml-ledger/2"))
+
+
+def test_an_unknown_schema_is_still_refused():
+    with pytest.raises(ValidationError, match="unsupported receipt schema"):
+        Receipt.model_validate(_receipt(schema="ooxml-ledger/3"))

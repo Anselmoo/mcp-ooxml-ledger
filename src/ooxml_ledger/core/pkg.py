@@ -35,6 +35,17 @@ CONTAINER_MAIN_PART = {
     ".xlsm": "xl/workbook.xml",
 }
 
+#: IANA media type per container suffix, for handing a document back to a client as an MCP
+#: embedded resource (`export_document`). Same keys as `CONTAINER_MAIN_PART`.
+CONTAINER_MIMETYPE = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".dotx": "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".potx": "application/vnd.openxmlformats-officedocument.presentationml.template",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+}
+
 _SYMLINK_MODE = 0o120000
 _FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 

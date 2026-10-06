@@ -601,7 +601,14 @@ document are all irrelevant.
     receipts/<result-digest>.json     content-addressed; no filename coupling
     index.json                        path → digest history, for humans
     baselines/<baseline-digest>.docx  OPTIONAL — enables T3
+    imports/<imported-digest>.json    import_document's provenance record (receipt-format-v2)
+    uploads/<upload-id>/              chunked import staging; swept after 1 h idle
 ```
+
+`imports/` and `uploads/` only ever appear beside `<first root>/_inbox/`, the one directory
+`import_document` writes into. An import record is written **before** the imported document
+is published and is never overwritten, so the earliest import of a package is its provenance
+(receipt-format-v2 §6).
 
 Consequences:
 
@@ -659,6 +666,16 @@ tamper-evidence.
 
 This is written here, in the README, and in the `verify` output — not discovered later by a
 sceptic. Claiming more would be the overclaim that sinks a tool like this on first contact.
+
+**Model-supplied bytes (`import_document`).** A hosted or chat client has no shared
+filesystem with the server, so a document can enter as base64 bytes in a tool call instead
+of as a file the user placed in the roots. The ledger cannot vouch that those bytes are the
+user's upload — only that they are what arrived. That is a provenance fact, not an integrity
+failure, so it is disclosed rather than refused: the import is recorded before the document
+exists on disk, and every receipt in that lineage is `ooxml-ledger/2` with a chain-bound
+`provenance` block (`receipt-format-v2.md`). The raw `sha256` lets a user who still holds the
+original upload check it out of band. The write itself stays inside the roots: a bare
+filename into `<first root>/_inbox/`, never over an existing file.
 
 ---
 
@@ -1093,3 +1110,4 @@ question:
 | A per-session exclusive lock serializes every session-mutating tool (post-editing-verbs fix, `c68e087`) | see §4.5's Concurrency row. Recorded here too because it closes the other half of the same defect the rollback above closes: without it, two concurrent writers could each reach `_write_and_record` and both succeed, which no single-call rollback can undo |
 | **As of Phase 3's close:** pptx and xlsx ship canonicalisation, receipts, gate replay and `verify` (Phases 1 and 3 reach all three formats there) but have **no editing engine** — `formats/` holds only `wml.py` | stated plainly rather than left implicit, because §2's format-agnostic ledger design is easy to misread as three-format editing already shipping. Phases 4 and 5 (§9) are where a pptx/xlsx editing engine would land, and neither had started |
 | **Superseded above, for pptx:** `formats/pml.py` shipped a direct-mode text-editing engine (`2041b44`..`3bd53c1`) and it was wired into `preview_edits`/`apply_edits` the same day (`c1ee02e`) — reusing `_write_and_record`, no second atomic writer | closes the row above for PowerPoint only. xlsx still has no editing engine — Phase 4 is unstarted. Recorded as a new row, not an edit to the old one, per the "invariants are stated once, decisions are appended" convention this log itself follows elsewhere in this table |
+| Hosted/chat clients get `import_document`/`export_document`, and an imported lineage is sealed as **`ooxml-ledger/2`**, a new normative document — not an optional v1 field (issue #4) | a chat upload is in the client's sandbox, so widening `OOXML_LEDGER_ROOTS` cannot reach it; bytes must cross the MCP channel. Import writes only a bare filename into `<first root>/_inbox/`, refuses to overwrite, validates through `Package.open` before publishing, and caps payloads (`OOXML_LEDGER_IMPORT_MAX_BYTES`, default 25 MiB; chunked upload with a mandatory whole-file sha256 because a chat model's per-call output is far smaller). The trust model inverts — the file's first existence on this host is a tool call — and the issue asked for that to be visible in the receipt. v1 models are `extra="forbid"` with an exact `schema` match, so ANY new key (even `null`) would make every new receipt unreadable to v0.3.0 verifiers; a new schema string makes that rejection explicit. v2 is emitted only for an imported lineage, so every other receipt stays byte-identical v1. The block is self-hashed and is the chain genesis (`prev_hash` of op 1), so stripping, editing or downgrading it breaks T2 — and it is NOT routed through `GateVerdict.notices`, because `attestation_for` re-derives those from the operations and would refuse the commit. `export_document` returns bytes as an MCP embedded resource and refuses an unsealed document by default; it writes nothing, so it survives read-only mode |

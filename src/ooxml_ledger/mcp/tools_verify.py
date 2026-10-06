@@ -62,6 +62,8 @@ class VerifyReport(BaseModel):
     #: would rebuild, one layer up, the hole the CLI closed — `verified`, exit 0, and silent
     #: about a change no reviewer can see as a redline.
     disclosures: list[str]
+    #: receipt-format-v2 provenance from `Verdict.provenance`, or None. Informational only.
+    provenance: dict | None = None
     #: Design §5.2.1's tri-state, carried straight through from `Verdict.baseline_checked`:
     #: `None` — T3 did not run (no `original` given and the store holds no baseline for this
     #: receipt); `True` — T3 ran and the baseline matched; `False` — T3 ran and it did not.
@@ -146,6 +148,7 @@ def register(server: FastMCP, deps: Deps) -> None:
             tiers=verdict.tiers,
             reasons=verdict.reasons,
             disclosures=verdict.disclosures,
+            provenance=verdict.provenance,
             baseline_checked=verdict.baseline_checked,
             exit_code=verdict.exit_code,
             caveat=ACCIDENT_EVIDENT_CAVEAT,

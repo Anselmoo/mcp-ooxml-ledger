@@ -41,6 +41,14 @@ DEFAULT_TTL_SECONDS = 3_600
 
 ROOTS_ENV_VAR = "OOXML_LEDGER_ROOTS"
 
+#: The one directory `import_document` writes into, directly under the FIRST root. Fixed, not
+#: caller-chosen: the caller supplies a bare filename and nothing else, so an import can never
+#: land on top of a document the user placed in the roots themselves.
+INBOX_DIRNAME = "_inbox"
+MAX_IMPORT_NAME_CHARS = 255
+_DRIVE_LETTER = re.compile(r"^[A-Za-z]:")
+UPLOAD_ID_RE = re.compile(r"[0-9a-f]{32}")
+
 
 def refuse(message: str) -> NoReturn:
     """Raise a refusal whose message is guaranteed to reach the caller."""
@@ -78,6 +86,59 @@ def checked_session_id(raw: str) -> str:
             "returned by open_document."
         )
     return raw
+
+
+def checked_upload_id(raw: str) -> str:
+    if not isinstance(raw, str) or not UPLOAD_ID_RE.fullmatch(raw):
+        refuse(
+            f"not an upload id: {raw!r}. Expected exactly 32 lowercase hex characters, as "
+            "returned by import_document(final=false)."
+        )
+    return raw
+
+
+def checked_sha256(raw: str | None) -> str | None:
+    """Accept `sha256:<hex>` or bare 64-hex (either case); return the `sha256:<lowercase>` form."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        refuse(f"sha256 must be a string; got {type(raw).__name__}")
+    value = raw.strip().lower().removeprefix("sha256:")
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        refuse(
+            f"not a sha256: {raw!r}. Expected 64 hex characters, optionally 'sha256:'-prefixed."
+        )
+    return "sha256:" + value
+
+
+def checked_import_name(raw: str) -> str:
+    """A bare filename for `import_document`: no directories, no hidden names, a container suffix.
+
+    Refused rather than sanitised: silently turning `../x.docx` into `x.docx` would hand the
+    caller back a path it did not ask for, and every later receipt would carry that name.
+    """
+    value = _plain_string(raw, "name")
+    if len(value) > MAX_IMPORT_NAME_CHARS:
+        refuse(
+            f"name must be at most {MAX_IMPORT_NAME_CHARS} characters; got {len(value)}"
+        )
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        refuse(f"name {raw!r} contains a control character")
+    if "/" in value or "\\" in value or _DRIVE_LETTER.match(value):
+        refuse(
+            f"name {raw!r} must be a bare filename, not a path: the document is always "
+            f"written into {INBOX_DIRNAME}/ under the server's first root"
+        )
+    if value.startswith((".", "~")) or value.strip() != value:
+        refuse(
+            f"name {raw!r} must not start with '.' or '~' or carry leading/trailing spaces"
+        )
+    if Path(value).suffix.lower() not in CONTAINER_MAIN_PART:
+        refuse(
+            f"name {raw!r}: unsupported container {Path(value).suffix!r}. "
+            f"Supported: {', '.join(sorted(CONTAINER_MAIN_PART))}"
+        )
+    return value
 
 
 def checked_digest(raw: str) -> str:
@@ -317,6 +378,42 @@ class Boundary(BaseModel):
                 return True
         return False
 
+    def inbox(self) -> Path:
+        """`<first root>/_inbox`, created if absent, refused if it is not a plain directory
+        inside the roots.
+
+        A symlinked `_inbox` is refused outright rather than followed: following it and then
+        re-checking containment would be correct today, but the one directory the server
+        CREATES files in is exactly where a link-swap race would pay off.
+        """
+        inbox = self.roots[0] / INBOX_DIRNAME
+        if inbox.is_symlink():
+            refuse(
+                f"{inbox} is a symbolic link; import_document only writes into a real "
+                f"{INBOX_DIRNAME}/ directory under the server's first root"
+            )
+        try:
+            inbox.mkdir(exist_ok=True)
+        except OSError as exc:
+            refuse(f"could not create {inbox}: {exc}")
+        if not inbox.is_dir():
+            refuse(f"{inbox} exists and is not a directory")
+        resolved = inbox.resolve()
+        if not self.within_roots(resolved) or self._is_inside_store(resolved):
+            refuse(f"{inbox} resolves outside the server's roots: {self._roots_text()}")
+        return resolved
+
+    def checked_inbox_dest(self, raw: str) -> Path:
+        """Where `import_document` may write a document: `<first root>/_inbox/<name>`.
+
+        A SECOND write primitive beside `checked_dest`, deliberately not a widening of it
+        (see `tools_receipts.py`): `checked_dest` is bounded to `.json` anywhere, this one to a
+        container suffix in one fixed directory, and never over an existing file — the
+        no-clobber rule is enforced at publish time with `os.link`, not just checked here.
+        """
+        name = checked_import_name(raw)
+        return self.inbox() / name
+
     def checked_json_path(self, raw: str) -> Path:
         path = self._resolve(raw, "receipt")
         if not path.is_file():
@@ -326,7 +423,8 @@ class Boundary(BaseModel):
         return path
 
     def checked_dest(self, raw: str, *, overwrite: bool) -> Path:
-        """Where a receipt may be written. The ONLY write primitive this server exposes.
+        """Where a receipt may be written. The only write primitive that takes a caller path
+        (`checked_inbox_dest` takes a bare filename into one fixed directory).
 
         THREE content rules, in this order, and the order is load-bearing for message quality:
 

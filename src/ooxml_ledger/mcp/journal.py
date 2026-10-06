@@ -39,6 +39,10 @@ class WorkingJournal(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     path: Path
+    #: What operation 1's `prev_hash` is sealed onto: None for a session over a user-supplied
+    #: document, `provenance.hash` for one whose lineage began at `import_document`
+    #: (receipt-format-v2 §4). Fixed at open, from `SessionMeta.provenance`.
+    genesis: str | None = None
 
     def read(self) -> JournalRead:
         if not self.path.exists():
@@ -131,7 +135,7 @@ class WorkingJournal(BaseModel):
                 "last complete operation and orphan the partial one. Close or commit this "
                 "session instead."
             )
-        prev = existing.operations[-1].hash if existing.operations else None
+        prev = existing.operations[-1].hash if existing.operations else self.genesis
         seq = len(existing.operations)
         sealed_all: list[dict] = []
         for raw in raws:

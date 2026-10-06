@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from pydantic import BaseModel, ConfigDict
 
 from .. import __version__
@@ -12,6 +14,7 @@ from .session import SessionRegistry
 
 __all__ = [
     "ACCIDENT_EVIDENT_CAVEAT",
+    "DEFAULT_TRANSFER_MAX_BYTES",
     "EDITABLE_KINDS",
     "GATE_TAG",
     "LEDGER_META_KEY",
@@ -20,12 +23,40 @@ __all__ = [
     "SESSION_TAG",
     "STATELESS_TAG",
     "TOOL_ID",
+    "TRANSFER_MAX_BYTES_ENV_VAR",
     "WRITES_TAG",
     "Deps",
     "ledger_meta",
+    "transfer_max_bytes_from_env",
 ]
 
 TOOL_ID = f"mcp-ooxml-ledger {__version__}"
+
+#: The largest document `import_document` accepts and `export_document` returns, in DECODED
+#: bytes. Base64 inflates by a third, so 25 MiB is ~33 MiB of tool-call payload — already far
+#: past what a chat model can emit in one call, which is what chunked import is for.
+DEFAULT_TRANSFER_MAX_BYTES = 25 * 1024 * 1024
+TRANSFER_MAX_BYTES_ENV_VAR = "OOXML_LEDGER_IMPORT_MAX_BYTES"
+
+
+def transfer_max_bytes_from_env() -> int:
+    """Read `OOXML_LEDGER_IMPORT_MAX_BYTES`; unset or blank means the default.
+
+    An unparseable or non-positive value RAISES `ValueError` rather than falling back: a typo
+    must not silently restore a cap the operator meant to lower.
+    """
+    raw = os.environ.get(TRANSFER_MAX_BYTES_ENV_VAR, "").strip()
+    if not raw:
+        return DEFAULT_TRANSFER_MAX_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        raise ValueError(
+            f"{TRANSFER_MAX_BYTES_ENV_VAR}={raw!r} is not a positive integer byte count"
+        )
+    return value
 
 
 class Deps(BaseModel):
@@ -36,6 +67,8 @@ class Deps(BaseModel):
     boundary: Boundary
     registry: SessionRegistry
     tool_id: str = TOOL_ID
+    #: Cap on one imported or exported document, in decoded bytes.
+    transfer_max_bytes: int = DEFAULT_TRANSFER_MAX_BYTES
 
 
 #: The CLOSED tag vocabulary. Closed because `create_server(read_only=True)` disables BY tag:

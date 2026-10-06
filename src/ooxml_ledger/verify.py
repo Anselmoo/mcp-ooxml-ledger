@@ -1,4 +1,5 @@
-"""Check a document against its receipt. Normative source: receipt-format-v1.md §6.
+"""Check a document against its receipt. Normative sources: receipt-format-v1.md §6,
+receipt-format-v2.md §5 (provenance).
 
 Three outcomes, reported distinctly:
 
@@ -23,8 +24,8 @@ from .canon.rules import CANON_VERSION
 from .core.errors import OoxmlLedgerError
 from .core.pkg import Package
 from .ledger.chain import first_break
-from .ledger.models import DISCLOSURE_PREFIX, Receipt
-from .ledger.store import ReceiptStore
+from .ledger.models import DISCLOSURE_PREFIX, PROVENANCE_DISCLOSURE, Receipt
+from .ledger.store import ReceiptStore, provenance_is_intact
 
 Outcome = Literal["verified", "unknown", "failed"]
 
@@ -44,6 +45,11 @@ class Verdict(BaseModel):
     #: receipt and `verify` output"; the receipt half shipped with the Word engine and this
     #: is the other half. Without it the CLI printed OK, exit 0, and said nothing.
     disclosures: list[str] = Field(default_factory=list)
+    #: receipt-format-v2 provenance, verbatim from the receipt, or None for a v1 receipt.
+    #: Like `disclosures` it never affects `outcome`/`exit_code`: an imported document is
+    #: not a wrong document. Its INTEGRITY does — a block whose hash does not recompute is
+    #: a T2 failure, reported in `reasons`.
+    provenance: dict | None = None
 
     #: The tri-state design §5.2.1 needs and `tiers["T3"]` alone cannot carry.
     #:
@@ -181,10 +187,19 @@ def verify(
     # the document. Accountability is checked once, at commit, by the gate, and recorded in
     # attestation.gate (receipt-format-v1 §6.1). Conflating the two is the specific error
     # this format exists to prevent.
-    broken = first_break(receipt.operations)
+    broken = first_break(receipt.operations, genesis=receipt.chain_genesis)
     tiers["T2"] = broken is None
     if broken is not None:
         reasons.append(f"T2 failed: the operation hash chain breaks at seq {broken}")
+    # receipt-format-v2 §4: the provenance block is self-hashed and its hash is the chain
+    # genesis. Checking only the genesis link would accept an edited block whose stale hash
+    # was left in place, and a zero-operation receipt has no link to check at all.
+    if receipt.provenance is not None and not provenance_is_intact(receipt.provenance):
+        tiers["T2"] = False
+        reasons.append(
+            "T2 failed: the provenance block's hash does not recompute — it was edited "
+            "after the receipt was written"
+        )
 
     # T3 (design §5.2.1): closes the loop that the claimed baseline is the real one. Runs
     # against a caller-supplied `original` when given — that always wins, since a caller who
@@ -263,6 +278,14 @@ def verify(
         if DISCLOSURE_PREFIX in (note := op.note or "")
     ]
 
+    provenance = (
+        None
+        if receipt.provenance is None
+        else receipt.provenance.model_dump(mode="json")
+    )
+    if provenance is not None:
+        disclosures = [PROVENANCE_DISCLOSURE, *disclosures]
+
     ok = (
         all(tiers.values())
         and receipt.attestation.gate == "passed"
@@ -271,6 +294,7 @@ def verify(
     return Verdict(
         outcome="verified" if ok else "failed",
         disclosures=disclosures,
+        provenance=provenance,
         digest=digest,
         reasons=reasons,
         tiers=tiers,

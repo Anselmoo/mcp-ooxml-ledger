@@ -27,11 +27,12 @@ pre-commit run --all-files           # everything pre-commit runs, before it run
 
 `OOXML_LEDGER_ROOTS` (os.pathsep-separated) sets the server's filesystem boundary; unset, it
 defaults to the server's cwd. `OOXML_LEDGER_READ_ONLY=1` strips every write tool.
+`OOXML_LEDGER_IMPORT_MAX_BYTES` caps `import_document`/`export_document` (default 25 MiB).
 
 ## Architecture
 
 ```
-mcp/server.py, tools_*.py, session.py, guards.py, journal.py   MCP surface (14 tools)
+mcp/server.py, tools_*.py, session.py, guards.py, journal.py   MCP surface (16 tools)
 cli.py                                                          CLI: verify against a receipt
 gate.py                                                          the refusal — commit-time replay
 formats/wml.py, formats/pml.py                                  format-specific editing engines
@@ -95,6 +96,12 @@ refusal.
 | `.docx` | yes | yes — tracked + direct, paragraph insert/delete |
 | `.pptx` | yes | direct only — PresentationML has no revision model, so every edit carries a mandatory §4.2 disclosure |
 | `.xlsx` | yes | no — editing verbs refuse, naming the format (`EDITABLE_KINDS` in `mcp/deps.py`) |
+
+`import_document`/`export_document` (`mcp/tools_transfer.py`, for chat/hosted clients with no
+shared filesystem) move bytes for all three formats. An imported lineage is sealed as
+`ooxml-ledger/2` (`receipt-format-v2.md`), with a `provenance` block whose hash is the chain
+genesis. Never route provenance through `GateVerdict.notices`, because `attestation_for`
+re-derives those from the operations and refuses on any mismatch.
 
 `verify`/`digest`/`gate.py`/receipts are format-agnostic. Only `formats/wml.py` (Word) and
 `formats/pml.py` (PowerPoint) are format-specific; there is no `formats/xlsx.py`.
