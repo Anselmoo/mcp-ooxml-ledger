@@ -331,3 +331,22 @@ def test_package_still_saves_and_reopens(tmp_path):
     out = pkg.save(tmp_path / "out.docx")
     again = Package.open(out, tmp_path / "w2")
     assert b"Revised paragraph" in again.read(DOC)
+
+
+def test_a_direct_edit_to_empty_text_removes_the_phrase_and_adds_no_run(tmp_path):
+    """`new=""` in direct mode is a pure deletion: head + tail, nothing between. Emitting a
+    run around an empty `w:t` there would leave an invisible, formatting-carrying run in
+    the document that no receipt describes."""
+    pkg = _pkg(tmp_path)
+    before = pkg.read(DOC)
+    _apply(pkg, [(" deliberately", "")])
+    after = pkg.read(DOC)
+
+    para = wml.iter_paragraphs(DOC, after)[2]
+    assert para.text == (
+        "Second paragraph, plain, with the word teh misspelled to provoke proofErr."
+    )
+    assert all(seg.text for seg in para.segs)  # no empty run left where the phrase was
+    assert b"<w:t></w:t>" not in after and b"<w:t/>" not in after
+    for mark in (wml.INS, wml.DEL):  # the corpus' own redline, and nothing added to it
+        assert len(find_spans(after, mark)) == len(find_spans(before, mark))

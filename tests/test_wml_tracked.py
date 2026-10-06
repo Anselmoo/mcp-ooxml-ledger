@@ -615,3 +615,40 @@ def test_accepting_a_row_deletion_destroys_a_tracked_edit_inside_it(tmp_path):
     assert op["after"] == "ROW TEXT"  # the ledger says the edit happened
     assert b"ROW TEXT" not in accepted  # the document does not
     assert b'w:author="Bob"' not in accepted  # and nothing records that it ever did
+
+
+def test_cut_refuses_pieces_that_do_not_decode_to_the_match():
+    """The `covered != expected` self-check is the last line between a mis-grouped piece
+    list and a document that silently lost or duplicated a character. `resolve` always
+    produces pieces that agree with the match, so the disagreement is manufactured here: the
+    pieces cover "contains a bold" while the match is widened by one character. Writing that
+    would drop the extra character from the deletion while the receipt claims it."""
+    data = zipfile.ZipFile(CORPUS / "docx-word-g3.docx").read(DOC)
+    paras = wml.iter_paragraphs(DOC, data)
+    (match,) = wml.find_matches(DOC, data, "contains a bold", paras=paras)
+    para = paras[match.para_index]
+    pieces = wml.resolve(data, para, match)
+    wider = match.model_copy(update={"char_end": match.char_end + 1})
+
+    with pytest.raises(EditRefused, match="internal consistency check failed"):
+        wml.cut_match(data, para, wider, pieces, b"w:")
+
+
+def test_para_id_confines_the_edit_to_that_paragraph(tmp_path):
+    """ "Header" occurs in three table-header paragraphs. Without `para_id`, occurrence 1 is
+    the FIRST of them; with it, the edit must land in the named paragraph and leave the
+    other two alone. An implementation that ignored `para_id` would edit "Header A" and
+    still report success."""
+    pkg = _pkg(tmp_path)
+    op = _edit(pkg, "Header", "Column", para_id="7DE805C5")
+
+    paras = wml.iter_paragraphs(DOC, pkg.read(DOC))
+    texts = {p.para_id: p.text for p in paras}
+    assert texts["7B76214A"] == "Header A"
+    assert texts["6CE5F503"].startswith("Second paragraph")
+    assert texts["49325A5D"] == "Header C"
+    target = next(p for p in paras if p.para_id == "7DE805C5")
+    deleted = "".join(s.text for s in target.segs if s.revision == wml.DEL)
+    inserted = "".join(s.text for s in target.segs if s.revision == wml.INS)
+    assert (deleted, inserted) == ("Header", "Column")
+    assert op["after"] == "Column"

@@ -712,3 +712,90 @@ def test_docx_priority_order_is_unchanged_without_the_main_part(tmp_path):
     pkg = _open("docx-producer.docx", tmp_path)
     candidates = ["word/styles.xml", "word/footnotes.xml"]
     assert _content_priority_order(pkg, "docx", candidates) == candidates
+
+
+# --- partial addresses: each format's hit-building branch must survive a missing anchor ---
+#
+# The docx branch already has its "no enclosing paragraph" test above. The pptx and xlsx
+# branches each have their own lookups (slide paragraph, shared-string item, sheet name,
+# cell), and every one of them can come back empty. A hit with a partial address is the
+# contract; a crash, or an address borrowed from a neighbouring element, is the defect.
+
+
+def test_search_reports_a_pptx_hit_with_no_enclosing_paragraph(tmp_path):
+    """An `a:t` sitting outside any `a:p` still belongs to a known slide, so the slide id is
+    reported — but there is no paragraph to index or hash, and inventing one would hand
+    `apply_edits` an address that does not exist."""
+    pkg = _open("pptx-ppt-g2.pptx", tmp_path)
+    pkg.write(
+        "ppt/slides/slide1.xml",
+        (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<root xmlns:a="{A}"><a:r><a:t>Loose Slide Text</a:t></a:r></root>'
+        ).encode(),
+    )
+    (hit,) = search(pkg, "Loose Slide")
+    assert hit.part == "ppt/slides/slide1.xml"
+    assert hit.slide_id == 256
+    assert hit.para_index is None
+    assert hit.para_hash is None
+
+
+def test_search_reports_a_shared_string_hit_with_no_enclosing_item(tmp_path):
+    """A `t` in the shared-string table but outside any `si` has no index. Reporting the
+    index of the nearest `si` would point a reader at a different string."""
+    pkg = _open("xlsx-excel-g2.xlsx", tmp_path)
+    pkg.write(
+        "xl/sharedStrings.xml",
+        (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<sst xmlns="{S}"><si><t>Indexed</t></si><t>Stray Shared</t></sst>'
+        ).encode(),
+    )
+    (hit,) = search(pkg, "Stray Shared", part="xl/sharedStrings.xml")
+    assert hit.text == "Stray Shared"
+    assert hit.shared_string_index is None
+    assert hit.sheet is None
+    assert hit.ref is None
+
+
+def test_search_reports_a_worksheet_hit_the_workbook_does_not_list(tmp_path):
+    """A worksheet part the workbook does not reference (an orphan left by a producer, or a
+    package edited by hand) is still searched — the text is in the file — and its cell
+    reference is still real. Only the sheet NAME is unknown, so only it is None."""
+    pkg = _open("xlsx-excel-g2.xlsx", tmp_path)
+    pkg.write(
+        "xl/worksheets/sheet99.xml",
+        (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<worksheet xmlns="{S}"><sheetData><row r="9">'
+            '<c r="Z9" t="inlineStr"><is><t>Orphan Sheet Text</t></is></c>'
+            "</row></sheetData></worksheet>"
+        ).encode(),
+    )
+    (hit,) = search(pkg, "Orphan Sheet")
+    assert hit.part == "xl/worksheets/sheet99.xml"
+    assert hit.sheet is None
+    assert hit.ref == "Z9"
+
+
+def test_search_reports_a_worksheet_hit_with_no_cell_or_no_cell_reference(tmp_path):
+    """Two ways a listed worksheet's text can lack a cell address: no enclosing `c` at all,
+    and a `c` with no `r` attribute (legal — `r` is optional in SpreadsheetML). Both keep the
+    sheet name, which is known, and report `ref=None` rather than guessing a position."""
+    pkg = _open("xlsx-excel-g2.xlsx", tmp_path)
+    (listed,) = [s for s in sheets(pkg) if s.part == "xl/worksheets/sheet1.xml"]
+    pkg.write(
+        "xl/worksheets/sheet1.xml",
+        (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<worksheet xmlns="{S}"><sheetData><row>'
+            '<c t="inlineStr"><is><t>Unreferenced Cell</t></is></c>'
+            "</row></sheetData><t>Cellless Text</t></worksheet>"
+        ).encode(),
+    )
+    by_text = {h.text: h for h in search(pkg, "e", part="xl/worksheets/sheet1.xml")}
+    assert set(by_text) == {"Unreferenced Cell", "Cellless Text"}
+    for hit in by_text.values():
+        assert hit.sheet == listed.name
+        assert hit.ref is None

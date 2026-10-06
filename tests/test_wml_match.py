@@ -366,3 +366,64 @@ def test_the_scan_terminates_even_with_the_needle_guard_removed():
     )
     assert proc.returncode == 0, proc.stderr.decode()[-400:]
     assert proc.stdout.decode().strip() == "REFUSED"
+
+
+class _FindsOnceAtTheCursor(str):
+    """A paragraph text whose `find` answers "here, consuming nothing" ONCE, then -1.
+
+    That is exactly the answer `"".find(x, start)` gives on every call, bounded to one call.
+    With the progress guard present, `_matches_in` refuses on the first answer; with it
+    deleted, the second call ends the loop and the scan RETURNS a zero-width match — so the
+    test below goes red rather than hanging, the same property the subprocess probe above
+    buys with a timeout.
+    """
+
+    answered = False
+
+    def find(self, sub, start=0, end=None):
+        if self.answered:
+            return -1
+        self.answered = True
+        return start
+
+
+def test_the_progress_guard_refuses_in_process_with_its_own_message():
+    """The subprocess probe above proves the scan TERMINATES without `_require_needle`; it
+    cannot report coverage or pin WHICH refusal fired, because any EditRefused prints the
+    same `REFUSED`. This pins the guard's own message, in-process, through `locate` — a public
+    entry point — so a later change that refuses for some other reason first (and leaves the
+    progress guard dead) is visible here."""
+    doc = (
+        b'<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        b"<w:body><w:p><w:r><w:t>foo bar</w:t></w:r></w:p></w:body></w:document>"
+    )
+    para = wml.iter_paragraphs(DOC, doc)[0]
+    para = para.model_copy(update={"text": _FindsOnceAtTheCursor(para.text)})
+
+    class _Truthy(str):
+        """Empty, so it consumes nothing, but truthy, so `_require_needle` lets it in."""
+
+        def __bool__(self):
+            return True
+
+    with pytest.raises(EditRefused, match="scan made no progress at character 0"):
+        wml.locate(para, _Truthy(""))
+
+
+def test_resolve_refuses_a_text_segment_that_carries_no_byte_span():
+    """`iter_paragraphs` never builds a `kind="text"` segment without `run`/`t`, so this is
+    reached only by a hand-built or mutated `Para`. It is an explicit refusal rather than an
+    `assert` because `-O` strips asserts, and the alternative is a splice computed from a
+    `None` offset. The segment is stripped with `model_copy` — exactly the kind of mutation
+    `Para`'s frozen model still permits — and `resolve` must refuse, not crash."""
+    data = _doc("docx-word-g3.docx")
+    paras = wml.iter_paragraphs(DOC, data)
+    (match,) = wml.find_matches(DOC, data, "deliberately misspelled", paras=paras)
+    para = paras[match.para_index]
+    segs = list(para.segs)
+    i = match.seg_indices[0]
+    segs[i] = segs[i].model_copy(update={"run": None})
+    broken = para.model_copy(update={"segs": tuple(segs)})
+
+    with pytest.raises(EditRefused, match="carries no run/t byte span"):
+        wml.resolve(data, broken, match)

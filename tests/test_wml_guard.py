@@ -427,3 +427,23 @@ def test_a_range_marker_leaves_no_revision_context_on_the_segment(marker):
     seg = paras[match.para_index].segs[match.seg_indices[0]]
     assert seg.revision is None
     assert seg.structural_revision is None
+
+
+def test_an_orphaned_property_mark_after_a_table_skips_the_tables_containers():
+    """Same orphan as above, but now a table PRECEDES it. The owner search walks back from
+    the `w:trPr` through every earlier `w:tc`/`w:tr`, and each of those has already closed.
+    Taking the nearest preceding container without checking that it encloses the property
+    would attribute this row-deletion mark to the table's last cell — refusing an edit there
+    that nothing actually entangles."""
+    data = (
+        b'<w:document xmlns:w="' + NS + b'"><w:body>'
+        b"<w:tbl><w:tr><w:tc><w:p><w:r><w:t>cell text</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+        b'<w:trPr><w:del w:id="1" w:author="Probe Author" '
+        b'w:date="2026-01-01T00:00:00Z"/></w:trPr>'
+        b"<w:p><w:r><w:t>orphan text</w:t></w:r></w:p>"
+        b"</w:body></w:document>"
+    )
+    cell, orphan = wml.iter_paragraphs(DOC, data)
+    assert cell.segs[0].structural_revision is None
+    assert orphan.segs[0].structural_revision is None
+    _check(data, "cell text", author="Bob")  # no entanglement: nothing refuses it

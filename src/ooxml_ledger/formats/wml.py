@@ -383,17 +383,14 @@ def _structural_at(
     `starts` is passed IN rather than derived here for the same reason: building it per call
     is itself O(owners) per segment, which is the same quadratic wearing a smaller constant.
     """
-    if not owners:
-        return (None, None, None)
-    best: tuple[int, str, str | None, int | None] | None = None
     for k in range(bisect.bisect_right(starts, at) - 1, -1, -1):
-        start, end, mark, author, rid = owners[k]
-        if end <= at:
-            continue
-        if best is None or start > best[0]:
-            best = (start, mark, author, rid)
-            break  # owners are sorted, so the first enclosing one walking back is innermost
-    return (None, None, None) if best is None else (best[1], best[2], best[3])
+        _start, end, mark, author, rid = owners[k]
+        if end > at:
+            # Owners are sorted by start, so the first enclosing one walking back is the
+            # innermost. (A `best` accumulator stood here whose `start > best[0]` arm could
+            # never run: it was only ever assigned immediately before this same `break`.)
+            return (mark, author, rid)
+    return (None, None, None)
 
 
 def _property_mark_ranges(
@@ -2506,11 +2503,17 @@ def _model_diff(
                 f"({len(a)} expected vs {len(b)} rejected)"
             )
             continue
-        for (ai, at_), (_bi, bt) in zip(a, b, strict=True):
-            if at_ != bt:
-                out.append(
-                    f"{part}: rejecting this session's revisions does not restore paragraph "
-                    f"{ai}. expected={at_[:80]!r} rejected={bt[:80]!r}"
-                )
-                break
+        # Same length and `a != b`, so SOME pair differs — index or text. Comparing the
+        # whole pair (not just the text) is what makes `next` total: a text-only check had
+        # a path where every text matched, the loop ran out, and nothing was reported for a
+        # part that does not restore.
+        ai, at_, bt = next(
+            (ai, at_, bt)
+            for (ai, at_), (bi, bt) in zip(a, b, strict=True)
+            if (ai, at_) != (bi, bt)
+        )
+        out.append(
+            f"{part}: rejecting this session's revisions does not restore paragraph "
+            f"{ai}. expected={at_[:80]!r} rejected={bt[:80]!r}"
+        )
     return out
