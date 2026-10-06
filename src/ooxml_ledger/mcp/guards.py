@@ -48,6 +48,8 @@ INBOX_DIRNAME = "_inbox"
 MAX_IMPORT_NAME_CHARS = 255
 _DRIVE_LETTER = re.compile(r"^[A-Za-z]:")
 UPLOAD_ID_RE = re.compile(r"[0-9a-f]{32}")
+#: Directories `import_document` writes inside `_inbox/.ooxml-ledger/`.
+_INBOX_STORE_SUBDIRS = ("imports", "uploads", "baselines")
 
 
 def refuse(message: str) -> NoReturn:
@@ -402,6 +404,16 @@ class Boundary(BaseModel):
         resolved = inbox.resolve()
         if not self.within_roots(resolved) or self._is_inside_store(resolved):
             refuse(f"{inbox} resolves outside the server's roots: {self._roots_text()}")
+        # The inbox's own store is written to as well — scratch unpacks, import records,
+        # upload staging, baselines — so a link anywhere on that path would carry those
+        # writes outside the roots exactly as a linked `_inbox` would.
+        store = resolved / STORE_DIRNAME
+        for path in (store, *(store / sub for sub in _INBOX_STORE_SUBDIRS)):
+            if path.is_symlink():
+                refuse(
+                    f"{path} is a symbolic link; import_document refuses to write through "
+                    "it, since that would carry its writes outside the server's roots"
+                )
         return resolved
 
     def checked_inbox_dest(self, raw: str) -> Path:

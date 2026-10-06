@@ -77,7 +77,7 @@ v2 adds one top-level key. It is required in v2 and forbidden in v1.
 | `imported_at` | RFC 3339 UTC time of the import. |
 | `tool` | The name and version of the tool that accepted the bytes. |
 | `digest` | Canonical digest (`canonicalization-v1.md`) of the package as imported. For a direct import it equals `baseline.digest`. For a lineage it is the digest of the **original** import. |
-| `sha256` | sha256 of the raw bytes as received. This is not a canonical digest; it records exactly what crossed the wire. |
+| `sha256` | sha256 of the raw bytes as received. This is not a canonical digest; it records exactly what crossed the wire. Like `name`, `size` and `chunks`, it describes the **earliest** import of this canonical package (§6). A later import of the same parts in a differently packed ZIP inherits this block unchanged. |
 | `size` | Raw byte count. |
 | `chunks` | How many tool calls carried the bytes (≥ 1). |
 | `hash` | `sha256(JCS(block without hash))`. This is the same construction as an operation hash with a null predecessor (`receipt-format-v1.md` §4.3). |
@@ -149,8 +149,16 @@ the original upload check it independently.
 `import_document` writes the import record **before** it publishes the document, so there
 is no moment at which the document can be opened without its provenance on record. The
 record is stored at `.ooxml-ledger/imports/sha256-<hex>.json` beside the imported document,
-content-addressed by `digest` and never overwritten, so the earliest import wins. An import
-record whose `hash` does not recompute is ignored rather than trusted.
+content-addressed by `digest` and never overwritten, so the earliest import wins.
+
+`import_document` refuses rather than records in these cases:
+- An import record already at that name is damaged or fails its own hash. Publishing anyway
+  would produce a document with no provenance, sealed as v1.
+- The target name is already taken, unless an intact record shows that exactly these bytes
+  were imported under exactly that name. A file the user put in `_inbox/` by hand is not an
+  import.
+
+At read time, an import record whose `hash` does not recompute is ignored rather than trusted.
 
 The baseline for the imported digest is stored at the same time (design §5.2.1), so T3 is
 available from the first commit on.

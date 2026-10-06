@@ -934,7 +934,11 @@ def test_a_publish_race_with_identical_bytes_is_already_present(server, monkeypa
     """The name was free at the pre-check and taken at publish time by the same bytes."""
     _, data = corpus("docx")
 
+    real = ReceiptStore.publish_new
+
     def racing(path, populate):
+        if path.suffix != ".docx":
+            return real(path, populate)
         path.write_bytes(data)
         raise FileExistsError(17, "File exists", str(path))
 
@@ -946,7 +950,11 @@ def test_a_publish_race_with_identical_bytes_is_already_present(server, monkeypa
 def test_a_publish_race_with_different_bytes_is_refused(server, monkeypatch):
     _, data = corpus("docx")
 
+    real = ReceiptStore.publish_new
+
     def racing(path, populate):
+        if path.suffix != ".docx":
+            return real(path, populate)
         path.write_bytes(b"someone else")
         raise FileExistsError(17, "File exists", str(path))
 
@@ -958,7 +966,11 @@ def test_a_publish_race_with_different_bytes_is_refused(server, monkeypatch):
 
 
 def test_a_publish_that_fails_is_refused_readably(server, monkeypatch):
+    real = ReceiptStore.publish_new
+
     def full(path, populate):
+        if path.suffix != ".docx":
+            return real(path, populate)
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(ReceiptStore, "publish_new", staticmethod(full))
@@ -990,10 +1002,14 @@ def test_an_unhashable_existing_file_counts_as_different(
 def test_export_refuses_readably_when_the_document_cannot_be_read(
     server, docx, monkeypatch
 ):
-    def broken(self):
-        raise OSError(5, "I/O error")
+    real = Path.open
 
-    monkeypatch.setattr(Path, "read_bytes", broken)
+    def broken(self, mode="r", *args, **kwargs):
+        if self == docx.resolve() and "r" in mode:
+            raise OSError(5, "I/O error")
+        return real(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", broken)
     message = refusal(
         server, "export_document", {"document": "ms.docx", "require_receipt": False}
     )
@@ -1059,3 +1075,96 @@ def test_the_sweep_gives_up_quietly_when_the_uploads_directory_cannot_be_listed(
     monkeypatch.setattr(Path, "iterdir", broken)
     body = _start(server, name="y.docx")
     assert body["complete"] is False
+
+
+# --- Copilot review on PR #5: provenance must never be misattributed or dropped ---------
+
+
+def test_identical_bytes_placed_in_the_inbox_by_hand_are_not_an_import(
+    server, workspace
+):
+    """A file the user dropped into `_inbox` was not put there by a tool call. Re-importing
+    the same bytes under its name must not retroactively record it as imported."""
+    name, data = corpus("docx")
+    inbox = workspace / "_inbox"
+    inbox.mkdir()
+    (inbox / name).write_bytes(data)
+    message = refusal(
+        server, "import_document", {"name": name, "content_base64": b64(data)}
+    )
+    assert "already exists" in message
+    assert not (inbox / ".ooxml-ledger" / "imports").exists()
+
+
+def test_a_damaged_import_record_refuses_rather_than_dropping_provenance(
+    server, workspace
+):
+    """`put_import` never overwrites, so a damaged record at this digest would survive it
+    and the document would be published with no provenance — and sealed as v1."""
+    name, data = corpus("docx")
+    first = import_one(server, "first.docx", data)
+    (record,) = (workspace / "_inbox" / ".ooxml-ledger" / "imports").iterdir()
+    record.write_text("{damaged")
+    message = refusal(
+        server, "import_document", {"name": name, "content_base64": b64(data)}
+    )
+    assert "damaged or fails its own hash" in message
+    assert not (workspace / "_inbox" / name).exists()
+    assert Path(first["path"]).exists()
+
+
+def test_an_import_record_that_cannot_be_written_is_refused(
+    server, workspace, monkeypatch
+):
+    def full(self, provenance):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(ReceiptStore, "put_import", full)
+    name, data = corpus("docx")
+    message = refusal(
+        server, "import_document", {"name": name, "content_base64": b64(data)}
+    )
+    assert "could not record the import" in message
+    assert not (workspace / "_inbox" / name).exists()
+
+
+@pytest.mark.parametrize("linked", [".ooxml-ledger", ".ooxml-ledger/imports"])
+def test_a_symlinked_inbox_store_is_refused(server, workspace, tmp_path, linked):
+    """Scratch unpacks, import records, staging and baselines are all written inside the
+    inbox's store; a link anywhere on that path would carry them outside the roots."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = workspace / "_inbox" / linked
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside)
+    name, data = corpus("docx")
+    message = refusal(
+        server, "import_document", {"name": name, "content_base64": b64(data)}
+    )
+    assert "symbolic link" in message
+    assert not any(outside.iterdir())
+
+
+def test_a_repacked_copy_of_an_imported_package_keeps_the_earliest_provenance(server):
+    """Provenance is keyed by the CANONICAL package (receipt-format-v2 §3, §6): a later
+    import of the same parts in a differently compressed ZIP is the same package, so its
+    lineage still begins at the first import. The report keeps the two apart: top-level
+    `sha256`/`size` are this call's bytes, `provenance` is the earliest import's."""
+    import io
+    import zipfile
+
+    _, data = corpus("docx")
+    first = import_one(server, "first.docx", data)
+    repacked = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(data)) as src,
+        zipfile.ZipFile(repacked, "w", zipfile.ZIP_STORED) as dst,
+    ):
+        for info in src.infolist():
+            dst.writestr(info.filename, src.read(info.filename))
+    second = import_one(server, "second.docx", repacked.getvalue())
+
+    assert second["digest"] == first["digest"]
+    assert second["sha256"] == sha(repacked.getvalue()) != first["sha256"]
+    assert second["provenance"] == first["provenance"]
+    assert second["provenance"]["name"] == "first.docx"

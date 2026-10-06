@@ -183,6 +183,11 @@ def _same_bytes(path: Path, sha: str) -> bool:
         return False
 
 
+def _imported_as(record: Provenance, dest: Path, sha: str) -> bool:
+    """Whether `record` says these exact bytes were imported under `dest`'s name."""
+    return record.name == dest.name and record.sha256 == sha
+
+
 def _name_taken(name: str) -> str:
     return (
         f"{name} already exists in the inbox with different content. Nothing was "
@@ -420,33 +425,68 @@ def register(server: FastMCP, deps: Deps) -> None:
                 kind = kind_of(pkg)
             digest = canon_of_manifest(parts)
 
-            # A name already taken by DIFFERENT bytes is refused before anything is written,
-            # so a refused import leaves no import record behind for bytes that never landed.
-            # `publish_new` below re-checks atomically; this is for a clean refusal.
-            if dest.exists() and not _same_bytes(dest, actual_sha):
-                refuse(_name_taken(dest.name))
-
             store = ReceiptStore.for_document(dest)
             existing = store.get_import(digest)
+            # A TAKEN NAME is idempotent only when these exact bytes were themselves put
+            # there by `import_document` under this name — an intact record matching the
+            # name and the raw sha256. Identical bytes the user dropped into `_inbox` by
+            # hand are NOT an import, and recording them as one would seal a receipt
+            # claiming a provenance the file never had. Refused before anything is
+            # written, so a refused import leaves no record behind.
+            if dest.exists():
+                if (
+                    existing is not None
+                    and _imported_as(existing, dest, actual_sha)
+                    and _same_bytes(dest, actual_sha)
+                ):
+                    return _report(dest, data, kind, digest, actual_sha, existing, True)
+                refuse(_name_taken(dest.name))
+
             provenance = existing or _provenance(dest.name, data, digest, chunks)
-            already_present = False
+            # ORDER IS THE POINT: the import record and the baseline land before the
+            # document does, so no caller can ever open the document without its
+            # provenance being on record.
             try:
-                # ORDER IS THE POINT: the import record and the baseline land before the
-                # document does, so no caller can ever open the document without its
-                # provenance being on record.
                 store.put_import(provenance)
+            except OSError as exc:
+                refuse(f"could not record the import of {dest.name}: {exc}")
+            # `put_import` never overwrites, so a damaged or tampered record already at this
+            # digest's name survives it — and the document would then be published with NO
+            # provenance and sealed as v1. Re-read what is actually on disk.
+            recorded = store.get_import(digest)
+            if recorded is None:
+                refuse(
+                    f"the import record for this package ({digest}) is damaged or fails "
+                    "its own hash, so this import cannot be recorded. Nothing was "
+                    f"imported; inspect {store.imports}."
+                )
+            try:
                 if not store.has_baseline(digest):
                     store.put_baseline(digest, candidate)
                 store.publish_new(dest, lambda fh: fh.write(data))
             except FileExistsError:
-                if not _same_bytes(dest, actual_sha):
+                # Lost a race for the name after the pre-check above.
+                if not (
+                    _imported_as(recorded, dest, actual_sha)
+                    and _same_bytes(dest, actual_sha)
+                ):
                     refuse(_name_taken(dest.name))
-                already_present = True
+                return _report(dest, data, kind, digest, actual_sha, recorded, True)
             except OSError as exc:
                 refuse(f"could not import {dest.name}: {exc}")
-        # The record that is ON DISK — the earliest import of these bytes — not the one
-        # this call may have built and then not written.
-        recorded = store.get_import(digest)
+        return _report(dest, data, kind, digest, actual_sha, recorded, False)
+
+    def _report(
+        dest: Path,
+        data: bytes,
+        kind: str,
+        digest: str,
+        actual_sha: str,
+        recorded: Provenance,
+        already_present: bool,
+    ) -> ImportReport:
+        # `provenance` is the record ON DISK — the earliest import of this canonical
+        # package (receipt-format-v2 §3) — while `sha256`/`size` describe this call's bytes.
         return ImportReport(
             complete=True,
             name=dest.name,
@@ -458,7 +498,7 @@ def register(server: FastMCP, deps: Deps) -> None:
             sha256=actual_sha,
             size=len(data),
             already_present=already_present,
-            provenance=None if recorded is None else recorded.model_dump(mode="json"),
+            provenance=recorded.model_dump(mode="json"),
             next_step=f"open_document(document={str(dest)!r})",
         )
 
@@ -496,17 +536,18 @@ def register(server: FastMCP, deps: Deps) -> None:
     ) -> ToolResult:
         """Return `document` as an embedded resource, with its receipt."""
         path = deps.boundary.checked_document(document)
+        cap = deps.transfer_max_bytes
         try:
-            # Size first, so an oversized document is refused without being read.
-            size = path.stat().st_size
-            if size > deps.transfer_max_bytes:
-                refuse(
-                    f"{path.name} is {size} bytes, over the {deps.transfer_max_bytes}-byte "
-                    f"cap ({TRANSFER_MAX_BYTES_ENV_VAR})"
-                )
-            data = path.read_bytes()
+            # ONE handle, at most cap+1 bytes. A `stat()` followed by a separate full read
+            # let a file replaced or grown in between slip past the cap, and allocate it.
+            with path.open("rb") as fh:
+                data = fh.read(cap + 1)
         except OSError as exc:
             refuse(f"could not read {path.name}: {exc}")
+        if len(data) > cap:
+            refuse(
+                f"{path.name} is over the {cap}-byte cap ({TRANSFER_MAX_BYTES_ENV_VAR})"
+            )
         with tempfile.TemporaryDirectory() as tmp:
             # Digest the bytes that are being RETURNED, not the file again: a rewrite between
             # two reads must not pair one file's receipt with another file's bytes.
