@@ -71,6 +71,10 @@ class ReceiptSummary(BaseModel):
     tool: str
     signed: bool
     matches_this_document: bool
+    #: `ooxml-ledger/1` or `ooxml-ledger/2`.
+    schema_version: str
+    #: receipt-format-v2 provenance — the lineage began at `import_document` — or None.
+    provenance: dict | None = None
 
 
 class ReceiptList(BaseModel):
@@ -91,7 +95,17 @@ class ExportReport(BaseModel):
     operations: int
     gate: str
     forced: bool
+    #: receipt-format-v2 provenance carried by the exported receipt, or None.
+    provenance: dict | None = None
     caveat: str
+
+
+def _provenance(receipt) -> dict | None:
+    return (
+        None
+        if receipt.provenance is None
+        else receipt.provenance.model_dump(mode="json")
+    )
 
 
 def _digest_of(path: Path) -> str:
@@ -135,6 +149,8 @@ def register(server: FastMCP, deps: Deps) -> None:
                     tool=r.attestation.tool,
                     signed=r.signature is not None,
                     matches_this_document=r.result.digest == digest,
+                    schema_version=r.schema_,
+                    provenance=_provenance(r),
                 )
                 for r in found.receipts
             ],
@@ -188,5 +204,6 @@ def register(server: FastMCP, deps: Deps) -> None:
             operations=len(receipt.operations),
             gate=receipt.attestation.gate,
             forced=receipt.attestation.forced,
+            provenance=_provenance(receipt),
             caveat=ACCIDENT_EVIDENT_CAVEAT,
         )

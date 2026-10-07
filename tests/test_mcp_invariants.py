@@ -32,6 +32,8 @@ EXPECTED_TOOLS = {
     "apply_edits": False,
     "delete_paragraph": False,
     "insert_paragraph": False,
+    "import_document": False,
+    "export_document": True,
 }
 
 
@@ -180,6 +182,11 @@ HOSTILE = [
             "author": "A",
         },
     ),
+    (
+        "import_document",
+        {"name": "../../etc/passwd.docx", "content_base64": "UEsDBA=="},
+    ),
+    ("export_document", {"document": "../../../../etc/passwd"}),
 ]
 
 #: `server_info` takes no parameters, so there is no hostile value to feed it.
@@ -228,6 +235,10 @@ TAGGED = {
     "apply_edits": {"writes", "session"},
     "delete_paragraph": {"writes", "session"},
     "insert_paragraph": {"writes", "session"},
+    # issue #4: bytes in and out for chat/hosted clients. `export_document` writes nothing,
+    # so it survives read-only mode; `import_document` creates a file and does not.
+    "import_document": {"writes", "stateless"},
+    "export_document": {"read-only", "stateless"},
 }
 
 

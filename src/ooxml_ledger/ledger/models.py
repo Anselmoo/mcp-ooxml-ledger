@@ -1,4 +1,4 @@
-"""Receipt data model. Normative source: receipt-format-v1.md §3-§5.
+"""Receipt data model. Normative sources: receipt-format-v1.md §3-§5, receipt-format-v2.md.
 
 `Operation` is a discriminated union on `op`. That is not stylistic: a verifier MUST refuse a
 receipt containing an operation it does not recognise, because silently skipping one would
@@ -15,12 +15,22 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
     TypeAdapter,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
-SCHEMA_VERSION = "ooxml-ledger/1"
+SCHEMA_V1 = "ooxml-ledger/1"
+#: receipt-format-v2: v1 plus a chain-bound `provenance` block. Emitted ONLY for a document
+#: whose lineage starts at bytes a tool call supplied (`import_document`); every other
+#: receipt is still written as v1, byte-identical to what v0.3.0 wrote.
+SCHEMA_V2 = "ooxml-ledger/2"
+SUPPORTED_SCHEMAS = (SCHEMA_V1, SCHEMA_V2)
+#: The schema a receipt is written as when it carries no provenance. Kept under its old name
+#: because external callers import it.
+SCHEMA_VERSION = SCHEMA_V1
 
 # \Z, not $: Python's $ also matches immediately BEFORE a trailing newline, so
 # "sha256:<64 hex>\n" passed this check and produced a filename carrying a control
@@ -32,6 +42,14 @@ SCHEMA_VERSION = "ooxml-ledger/1"
 #: format engine. The convention is receipt-format territory anyway: it is a rule about what
 #: an operation's `note` field means.
 DISCLOSURE_PREFIX = "direct-mode edit in a revision-capable part"
+
+#: The receipt-format-v2 provenance disclosure. Like a §4.2 disclosure it is surfaced by
+#: `verify` and never changes the verdict: an imported document is not a wrong document, but
+#: a reader must not be left assuming the session started from a file the user supplied.
+PROVENANCE_DISCLOSURE = (
+    "imported document: its first bytes on this host arrived through an MCP tool call "
+    "(import_document), not as a file placed in the server's roots"
+)
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}\Z")
 
@@ -268,6 +286,37 @@ class Signature(BaseModel):
     covers: str | None = None
 
 
+class Provenance(BaseModel):
+    """Where a document's lineage began, when that was NOT a file the user placed on disk.
+
+    receipt-format-v2 §3. The block is self-hashed (`hash` over the JCS of every other field)
+    and that hash is the chain GENESIS: operation 1's `prev_hash` is `provenance.hash`, not
+    null. Altering or stripping the block therefore breaks the chain exactly as altering an
+    operation does — and a zero-operation receipt still carries a checkable block.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    origin: Literal["import"]
+    via: Literal["import_document"]
+    #: The filename the client supplied — not a server path.
+    name: str = Field(min_length=1)
+    imported_at: str
+    tool: str
+    #: Canonical digest of the package as imported.
+    digest: str
+    #: sha256 of the raw bytes as received, before any canonicalisation.
+    sha256: str
+    size: int = Field(ge=0)
+    chunks: int = Field(ge=1)
+    hash: str
+
+    @field_validator("digest", "sha256", "hash")
+    @classmethod
+    def _digest_format(cls, v: str) -> str:
+        return _check_digest(v)
+
+
 class Receipt(BaseModel):
     """The artifact of record. The document proves nothing without it, and vice versa."""
 
@@ -280,15 +329,46 @@ class Receipt(BaseModel):
     result: Snapshot
     attestation: Attestation
     signature: Signature | None
+    #: receipt-format-v2 only. Absent — not null — from every v1 receipt (see `_serialise`).
+    provenance: Provenance | None = None
 
     @field_validator("schema_")
     @classmethod
     def _known_schema(cls, v: str) -> str:
-        if v != SCHEMA_VERSION:
+        if v not in SUPPORTED_SCHEMAS:
             raise ValueError(
-                f"unsupported receipt schema {v!r}; this build implements {SCHEMA_VERSION}"
+                f"unsupported receipt schema {v!r}; this build implements "
+                + ", ".join(SUPPORTED_SCHEMAS)
             )
         return v
+
+    @model_validator(mode="after")
+    def _provenance_matches_schema(self) -> Receipt:
+        if self.schema_ == SCHEMA_V1 and self.provenance is not None:
+            raise ValueError(
+                f"a {SCHEMA_V1} receipt cannot carry provenance; provenance is "
+                f"{SCHEMA_V2} (receipt-format-v2 §3)"
+            )
+        if self.schema_ == SCHEMA_V2 and self.provenance is None:
+            raise ValueError(
+                f"a {SCHEMA_V2} receipt MUST carry provenance (receipt-format-v2 §3)"
+            )
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialise(self, handler: SerializerFunctionWrapHandler) -> dict:
+        # A v1 receipt must stay byte-identical to what v0.3.0 wrote: every model here is
+        # extra="forbid", so even `"provenance": null` would make it unreadable to an
+        # existing verifier.
+        data = handler(self)
+        if self.provenance is None:
+            data.pop("provenance", None)
+        return data
+
+    @property
+    def chain_genesis(self) -> str | None:
+        """The `prev_hash` operation 1 must carry: null in v1, `provenance.hash` in v2."""
+        return None if self.provenance is None else self.provenance.hash
 
     @model_validator(mode="after")
     def _seq_is_contiguous(self) -> Receipt:

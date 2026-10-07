@@ -24,15 +24,17 @@ from pydantic import BaseModel
 from .. import __version__
 from ..canon.rules import CANON_VERSION
 from ..core.pkg import CONTAINER_MAIN_PART
-from ..ledger.models import SCHEMA_VERSION
+from ..ledger.models import SCHEMA_VERSION, SUPPORTED_SCHEMAS
 from .deps import (
     ACCIDENT_EVIDENT_CAVEAT,
     EDITABLE_KINDS,
     NON_READ_ONLY_TAGS,
     READ_ONLY_TAG,
     STATELESS_TAG,
+    TRANSFER_MAX_BYTES_ENV_VAR,
     Deps,
     ledger_meta,
+    transfer_max_bytes_from_env,
 )
 from .guards import ROOTS_ENV_VAR, Boundary
 from .session import SessionRegistry
@@ -44,7 +46,7 @@ def read_only_from_env() -> bool:
     """Read `OOXML_LEDGER_READ_ONLY`. Anything unrecognised is FALSE.
 
     Defaulting an unrecognised value to read-only would be the safer-LOOKING choice and the
-    wrong one: a typo'd env var would silently remove ten tools and the operator would debug
+    wrong one: a typo'd env var would silently remove eleven tools and the operator would debug
     a missing tool instead of a misspelt variable.
     """
     return os.environ.get("OOXML_LEDGER_READ_ONLY", "").strip().lower() in _TRUTHY
@@ -87,10 +89,20 @@ server refuse a paragraph whose text has moved on. There is no raw index paramet
 same reason: the new paragraph is placed beside a paragraph you have named and the server has
 re-resolved, never at a number that may have moved.
 
+CHAT AND HOSTED CLIENTS. A file uploaded into a chat lives in the client's sandbox, not on
+this server's filesystem, so its path cannot be opened. Send its BYTES instead:
+`import_document(name, content_base64)` writes `_inbox/<name>` under the first root and returns
+the path for `open_document`; for a large file send chunks (`final=false`, then `upload_id` and
+`offset`, and `sha256` of the whole on the final chunk). The loop is import_document ->
+open_document -> ... -> commit_document -> export_document, which hands the sealed file back
+as an embedded resource with its receipt. A document that entered through `import_document`
+is sealed into an `ooxml-ledger/2` receipt whose `provenance` block records that its first
+bytes on this host came from a tool call, not from the user's own filesystem.
+
 READ-ONLY MODE. Setting `OOXML_LEDGER_READ_ONLY=1` at launch leaves only `server_info`,
-`digest`, `verify` and `list_receipts` — the tools that need no session and write nothing.
-The session, export, editing and commit verbs are not merely hidden: calling one answers
-`Unknown tool`. Run CI this way; the gate has never needed a session, and in this mode the
+`digest`, `verify`, `list_receipts` and `export_document` — the tools that need no session and
+write nothing. The session, import, receipt-export, editing and commit verbs are not merely
+hidden: calling one answers `Unknown tool`. Run CI this way; the gate has never needed a session, and in this mode the
 server has no write surface inside its roots at all. `server_info` reports `read_only`.
 """
 
@@ -102,7 +114,13 @@ READ_ONLY = ToolAnnotations(
 class ServerInfo(BaseModel):
     tool: str
     canon: str
+    #: The schema a receipt is written as by default (`ooxml-ledger/1`). A document whose
+    #: lineage began at `import_document` is sealed as `ooxml-ledger/2` instead.
     receipt_schema: str
+    #: Every receipt schema this build reads and verifies.
+    receipt_schemas: list[str]
+    #: Cap on one `import_document`/`export_document` payload, in decoded bytes.
+    transfer_max_bytes: int
     roots: list[str]
     #: Every container this build can open — digest, search, describe and verify all work on
     #: each of them. NOT the same set as `editing_formats`.
@@ -121,9 +139,19 @@ class ServerInfo(BaseModel):
 
 
 def create_server(
-    roots: Sequence[Path | str] | None = None, read_only: bool = False
+    roots: Sequence[Path | str] | None = None,
+    read_only: bool = False,
+    transfer_max_bytes: int | None = None,
 ) -> FastMCP:
-    deps = Deps(boundary=Boundary.from_roots(roots), registry=SessionRegistry())
+    deps = Deps(
+        boundary=Boundary.from_roots(roots),
+        registry=SessionRegistry(),
+        transfer_max_bytes=(
+            transfer_max_bytes_from_env()
+            if transfer_max_bytes is None
+            else transfer_max_bytes
+        ),
+    )
     server = FastMCP(
         name="ooxml-ledger",
         version=__version__,
@@ -144,6 +172,8 @@ def create_server(
             tool=deps.tool_id,
             canon=CANON_VERSION,
             receipt_schema=SCHEMA_VERSION,
+            receipt_schemas=list(SUPPORTED_SCHEMAS),
+            transfer_max_bytes=deps.transfer_max_bytes,
             roots=[str(r) for r in deps.boundary.roots],
             formats=sorted(("docx", "pptx", "xlsx")),
             editing_formats=[] if read_only else sorted(EDITABLE_KINDS),
@@ -158,6 +188,7 @@ def create_server(
     from .tools_read import register as register_read
     from .tools_receipts import register as register_receipts
     from .tools_session import register as register_session
+    from .tools_transfer import register as register_transfer
     from .tools_verify import register as register_verify
 
     register_verify(server, deps)
@@ -166,6 +197,7 @@ def create_server(
     register_receipts(server, deps)
     register_commit(server, deps)
     register_edit(server, deps)
+    register_transfer(server, deps)
 
     if read_only:
         # NOT a listing filter. `disable(tags=...)` removes the tool from `tools/list` AND
@@ -204,7 +236,18 @@ def main() -> None:
     default inside `from_roots` (rather than substituting something here) guarantees.
     """
     try:
-        server = create_server(read_only=read_only_from_env())
+        transfer_max_bytes = transfer_max_bytes_from_env()
+    except ValueError as exc:
+        print(
+            f"ooxml-ledger-mcp: {exc}. Unset {TRANSFER_MAX_BYTES_ENV_VAR} for the default "
+            "cap, or set it to a positive number of bytes.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
+    try:
+        server = create_server(
+            read_only=read_only_from_env(), transfer_max_bytes=transfer_max_bytes
+        )
     except ValueError as exc:
         print(
             f"ooxml-ledger-mcp: {exc}. Check the {ROOTS_ENV_VAR} environment variable "

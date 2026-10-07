@@ -544,3 +544,50 @@ def test_an_object_the_session_itself_inserted_is_not_reported(tmp_path):
     ok, problems = wml.visibility_ok(baseline, pkg, set(alloc.taken), tmp_path / "vk")
     assert problems == [], problems
     assert ok is True
+
+
+def test_rejecting_no_ids_returns_the_part_untouched():
+    """A session with only `direct` operations has an empty tracked-id set. Rejecting
+    "nothing" must be the identity — not a parse-and-resplice that could still disturb the
+    bytes — and it must not report problems the session did not cause."""
+    data = (CORPUS / "docx-word-g3.docx").read_bytes()  # any bytes: never parsed
+    out, problems = wml.reject_only(data, set())
+    assert out is data
+    assert problems == []
+
+
+def test_an_inserted_paragraph_mark_outside_any_paragraph_is_reported_not_guessed():
+    """A `w:pPr/w:rPr/w:ins` with no enclosing `w:p` (schema-invalid, but parseable, and a
+    receipt written elsewhere can carry it) has no paragraph to remove. Rejection reports
+    it as a problem and leaves the bytes alone; guessing a paragraph would delete text the
+    session never inserted, and crashing on the missing owner would fail the gate with an
+    unexplained KeyError instead of a reason."""
+    ns = wml.W.encode()
+    data = (
+        b'<w:document xmlns:w="' + ns + b'"><w:body>'
+        b'<w:pPr><w:rPr><w:ins w:id="5" w:author="Bob" '
+        b'w:date="2026-08-26T12:00:00Z"/></w:rPr></w:pPr>'
+        b"<w:p><w:r><w:t>keep</w:t></w:r></w:p>"
+        b"</w:body></w:document>"
+    )
+    out, problems = wml.reject_only(data, {5})
+    assert out == data
+    assert problems == ["inserted paragraph mark w:id=5 has no enclosing w:p"]
+
+
+def test_reject_only_package_replaces_a_stale_workdir(tmp_path):
+    """`gate` hands `visibility_ok` a fixed `<workdir>/reject`, so a second gate run with the
+    same workdir finds the first run's copy already there. That leftover (an extra part, or a
+    part from a different document) must not leak into this rejection: `copytree` refuses an
+    existing destination, and merging into it would let a stale part answer for the current
+    one."""
+    pkg = _open(tmp_path, "docx-word-g3.docx", "a")
+    workdir = tmp_path / "rk"
+    (workdir / "word").mkdir(parents=True)
+    (workdir / "stale.xml").write_bytes(b"<left-over/>")
+    (workdir / "word" / "document.xml").write_bytes(b"<not-this-document/>")
+
+    copy, problems = wml.reject_only_package(pkg, set(), workdir)
+    assert problems == []
+    assert not (workdir / "stale.xml").exists()
+    assert copy.read(DOC) == pkg.read(DOC)

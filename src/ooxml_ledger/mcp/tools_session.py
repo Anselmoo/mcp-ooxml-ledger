@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from ..canon import CANON_VERSION, canon_of_manifest, manifest
 from ..core.errors import OoxmlLedgerError
 from ..core.pkg import Package
+from ..ledger.models import Provenance
 from ..ledger.store import ReceiptStore
 from ..outline import kind_of
 from .deps import SESSION_TAG, STATELESS_TAG, WRITES_TAG, Deps, ledger_meta
@@ -77,6 +78,10 @@ class OpenReport(BaseModel):
     baseline_stored: bool
     swept: list[str]
     swept_skipped: list[str]
+    #: receipt-format-v2 provenance this session inherits — the document (or the receipt
+    #: lineage it descends from) entered through `import_document` — or None. When set, the
+    #: commit seals an `ooxml-ledger/2` receipt carrying it.
+    provenance: dict | None = None
 
 
 class CloseReport(BaseModel):
@@ -89,6 +94,10 @@ class CloseReport(BaseModel):
     #: Why the journal could not be read, when it could not. None on every ordinary close.
     journal_unreadable: str | None = None
     removed_directory: str
+
+
+def _dump(provenance: Provenance | None) -> dict | None:
+    return None if provenance is None else provenance.model_dump(mode="json")
 
 
 def _same_document(recorded: str, document: Path) -> bool:
@@ -252,6 +261,9 @@ def register(server: FastMCP, deps: Deps) -> None:
                 parts = manifest(pkg)
                 kind = cast(DocumentKind, kind_of(pkg))
             digest = canon_of_manifest(parts)
+            # receipt-format-v2: decided at open and frozen into meta — it is the chain
+            # genesis for every operation this session journals.
+            provenance = ReceiptStore.for_document(path).provenance_for(digest)
 
             # session-durability-02 (F09): from here through registering the new session is
             # the scan-and-create critical section. Without a lock spanning it, two concurrent
@@ -290,6 +302,7 @@ def register(server: FastMCP, deps: Deps) -> None:
                         baseline_stored=False,
                         swept=report.removed,
                         swept_skipped=report.skipped,
+                        provenance=_dump(resumed_meta.provenance),
                     )
 
                 session_id = new_session_id()
@@ -329,6 +342,7 @@ def register(server: FastMCP, deps: Deps) -> None:
                     created=utc_now(),
                     expires=expires,
                     tool=deps.tool_id,
+                    provenance=provenance,
                 )
                 (root / "meta.json").write_text(
                     meta.model_dump_json(indent=2), encoding="utf-8"
@@ -364,6 +378,7 @@ def register(server: FastMCP, deps: Deps) -> None:
             baseline_stored=stored,
             swept=report.removed,
             swept_skipped=report.skipped,
+            provenance=_dump(provenance),
         )
 
     @server.tool(

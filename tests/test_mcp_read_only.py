@@ -21,7 +21,13 @@ from mcp_harness import call, refusal, tools
 
 from ooxml_ledger.mcp.server import create_server
 
-READ_ONLY_SURFACE = {"server_info", "digest", "verify", "list_receipts"}
+READ_ONLY_SURFACE = {
+    "server_info",
+    "digest",
+    "verify",
+    "list_receipts",
+    "export_document",
+}
 
 
 @pytest.fixture
@@ -46,6 +52,7 @@ def test_a_read_only_server_lists_only_the_stateless_read_tools(read_only_server
         "apply_edits",
         "delete_paragraph",
         "insert_paragraph",
+        "import_document",
     ],
 )
 def test_a_read_only_server_refuses_to_call_the_writing_and_session_tools(

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -36,8 +37,8 @@ from fastmcp.exceptions import ToolError
 STARTUP_TIMEOUT = 60
 
 # The full advertised surface -- README's tool table, `server.py`'s SERVER_INSTRUCTIONS, and
-# `create_server` (register_verify/session/read/receipts/commit/edit + the inline
-# `server_info`) all agree on these 14 names.
+# `create_server` (register_verify/session/read/receipts/commit/edit/transfer + the inline
+# `server_info`) all agree on these 16 names.
 ALL_TOOLS = frozenset(
     {
         "server_info",
@@ -54,13 +55,17 @@ ALL_TOOLS = frozenset(
         "insert_paragraph",
         "commit_document",
         "export_receipt",
+        "import_document",
+        "export_document",
     }
 )
 
 # `create_server(read_only=True)`'s surface -- the tools tagged neither `writes` nor
 # `session`. Mirrors READ_ONLY_SURFACE in test_mcp_read_only.py, which proves the same set
 # against the in-memory client.
-READ_ONLY_SURFACE = frozenset({"server_info", "digest", "verify", "list_receipts"})
+READ_ONLY_SURFACE = frozenset(
+    {"server_info", "digest", "verify", "list_receipts", "export_document"}
+)
 
 
 def _transport(roots, *, read_only: bool = False) -> StdioTransport:
@@ -145,3 +150,46 @@ def test_a_real_tools_call_round_trips_arguments_and_structured_results(tmp_path
     assert info.structured_content["tool"].startswith("mcp-ooxml-ledger")
     assert digested.structured_content["name"] == docx.name
     assert digested.structured_content["digest"]
+
+
+def test_a_chat_round_trip_imports_commits_and_exports_over_the_wire(tmp_path):
+    """Issue #4 end to end, over real stdio: bytes in through `import_document`, a sealed
+    `ooxml-ledger/2` receipt, and the same bytes back out as an embedded resource — the
+    path a hosted/chat client, which shares no filesystem with the server, actually takes."""
+    import base64
+
+    from mcp.types import BlobResourceContents, EmbeddedResource
+
+    data = (
+        Path(__file__).parent / "fixtures" / "corpus" / "docx-word-g2.docx"
+    ).read_bytes()
+
+    async def run():
+        async with _client(_transport(tmp_path)) as client:
+            imported = await client.call_tool(
+                "import_document",
+                {
+                    "name": "chat.docx",
+                    "content_base64": base64.b64encode(data).decode(),
+                },
+            )
+            path = imported.structured_content["path"]
+            opened = await client.call_tool("open_document", {"document": path})
+            committed = await client.call_tool(
+                "commit_document",
+                {"session_id": opened.structured_content["session_id"]},
+            )
+            exported = await client.call_tool("export_document", {"document": path})
+            return committed, exported
+
+    committed, exported = asyncio.run(run())
+    assert committed.structured_content["receipt_schema"] == "ooxml-ledger/2"
+    blobs = [
+        c.resource
+        for c in exported.content
+        if isinstance(c, EmbeddedResource)
+        and isinstance(c.resource, BlobResourceContents)
+    ]
+    assert len(blobs) == 1
+    assert base64.b64decode(blobs[0].blob) == data
+    assert exported.structured_content["receipt_schema"] == "ooxml-ledger/2"

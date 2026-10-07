@@ -785,3 +785,28 @@ def test_within_roots_accepts_a_prefix_the_filesystem_reports_as_the_root(
     )
     assert boundary.within_roots(pathlib.Path(str(root).upper()) / "doc.docx")
     assert not boundary.within_roots(tmp_path.resolve() / "Other" / "doc.docx")
+
+
+# --- import_document's guards, called directly (the tool schema already types them) ----
+
+
+def test_checked_sha256_refuses_a_non_string():
+    from ooxml_ledger.mcp.guards import checked_sha256
+
+    with pytest.raises(ToolError, match="sha256 must be a string"):
+        checked_sha256(123)  # ty: ignore[invalid-argument-type]
+
+
+def test_checked_sha256_normalises_both_spellings():
+    from ooxml_ledger.mcp.guards import checked_sha256
+
+    assert checked_sha256(None) is None
+    assert checked_sha256("SHA256:" + "A" * 64) == "sha256:" + "a" * 64
+    assert checked_sha256("b" * 64) == "sha256:" + "b" * 64
+
+
+def test_checked_upload_id_refuses_a_non_string():
+    from ooxml_ledger.mcp.guards import checked_upload_id
+
+    with pytest.raises(ToolError, match="not an upload id"):
+        checked_upload_id(None)  # ty: ignore[invalid-argument-type]

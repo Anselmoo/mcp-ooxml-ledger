@@ -110,6 +110,13 @@ def verify(
     # disclosure is something a reader must be told, not a failure.
     for note in verdict.disclosures:
         typer.echo(f"        NOTE  {note}")
+    # receipt-format-v2: where the lineage began. Informational, like a NOTE.
+    if verdict.provenance is not None:
+        prov = verdict.provenance
+        typer.echo(
+            f"        PROVENANCE  imported via {prov['via']} as {prov['name']!r} at "
+            f"{prov['imported_at']} ({prov['size']} bytes, {prov['sha256']})"
+        )
     # The caveat applies to all unsigned receipts: it is printed in all cases to stderr as
     # a disclaimer about what unsigned means. Unlike reasons (which are failures), the caveat
     # does not change the exit code and does not alter the verdict.

@@ -330,3 +330,30 @@ def test_a_match_covering_no_segment_is_refused():
     )
     with pytest.raises(EditRefused, match="covers no segment"):
         pml.resolve(data, para, match)
+
+
+# -- the two defensive guards: kept so that deleting an upstream guard is a red test ----
+
+
+def test_the_scan_refuses_rather_than_spins_if_the_empty_needle_guard_is_removed(
+    monkeypatch,
+):
+    """`_matches_in` documents its no-progress check as unreachable WHILE `_require_needle`
+    runs, and kept so that deleting that guard fails loudly instead of hanging. Delete it."""
+    monkeypatch.setattr(pml, "_require_needle", lambda needle: None)
+    para = _one(_slide(b"<a:p><a:r><a:t>abc</a:t></a:r></a:p>"))
+    with pytest.raises(EditRefused, match="made no progress"):
+        pml._matches_in(para, "")
+
+
+def test_resolve_refuses_a_text_segment_with_no_run_span():
+    """A 'text' segment always carries its run/a:t spans; one that does not has no element
+    to splice against, and must be refused rather than spliced at a `None` offset."""
+    data = _slide(b"<a:p><a:r><a:t>hello</a:t></a:r></a:p>")
+    para = _one(data)
+    match = pml.locate(para, "hello")
+    broken = para.model_copy(
+        update={"segs": [para.segs[0].model_copy(update={"run": None})]}
+    )
+    with pytest.raises(EditRefused, match="carries no run/a:t byte span"):
+        pml.resolve(data, broken, match)

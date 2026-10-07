@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`import_document`** (issue #4) brings a `.docx`/`.pptx`/`.xlsx` in as base64 bytes, for
+  hosted and chat MCP clients whose uploads are not on the server's filesystem.
+  - It writes only a bare filename into `<first root>/_inbox/` and never overwrites an
+    existing file.
+  - The bytes are validated through `Package.open` (the zip-bomb, traversal and main-part
+    checks) before anything is published.
+  - Large files can be sent in optional chunks (`final`, `upload_id`, `offset`). The final
+    chunk requires a whole-file `sha256`.
+  - Uploads are capped by `OOXML_LEDGER_IMPORT_MAX_BYTES` (default 25 MiB).
+- **`export_document`** returns a document, and its receipt, to the client as MCP embedded
+  resources.
+  - It refuses a document that no stored receipt matches unless you pass
+    `require_receipt=false`.
+  - It is read-only, so it is still available when `OOXML_LEDGER_READ_ONLY=1`.
+- **Receipt schema `ooxml-ledger/2`** (`docs/superpowers/specs/receipt-format-v2.md`), which is
+  v1 plus a self-hashed `provenance` block.
+  - It is written only when a document's lineage began at `import_document`.
+  - The block is the chain genesis: operation 1's `prev_hash` is `provenance.hash`.
+  - `verify` (MCP and CLI), `list_receipts`, `export_receipt`, `open_document` and
+    `commit_document` all report the provenance. The CLI prints it as a `PROVENANCE` line.
+    It never changes a verdict.
+- `server_info` reports `receipt_schemas` and `transfer_max_bytes`.
+
+### Changed
+
+- The read-only surface is now five tools: `export_document` joins `server_info`, `digest`,
+  `verify` and `list_receipts`.
+- `ReceiptSummary` (from `list_receipts`) gains `schema_version` and `provenance`.
+- Receipts for documents that did not enter through `import_document` are still
+  `ooxml-ledger/1` and byte-identical to v0.3.0's.
+- The test suite no longer depends on running as a non-root user. The permission-failure
+  tests used `chmod` to make a journal, `meta.json` or a directory unwritable, which root
+  ignores, so they failed in containers. A new `deny_writes` fixture still applies the real
+  `chmod`. It then checks whether the write is actually refused, and if it is not, it
+  injects the same `PermissionError` instead.
+- Coverage of `src/ooxml_ledger` is 100% (line and branch), enforced by
+  `[tool.coverage.report] fail_under = 100`.
+
+### Fixed
+
+- The chunked-upload sweep could turn a transient filesystem error (`Path.is_dir()`
+  re-raises EIO/EACCES) into a masked `import_document` failure. Every probe in the sweep
+  is now best-effort.
+
 ## [0.3.0] - 2026-09-13
 ### Changed
 

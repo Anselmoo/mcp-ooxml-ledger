@@ -59,6 +59,8 @@ directly gives `ENOENT` — it lives in the project venv, not your shell's `PATH
 | **seal** | `commit_document` | writes · enforces the gate |
 | **stateless** | `server_info` · `digest` · `verify` · `list_receipts` | read-only |
 | | `export_receipt` | writes |
+| **transfer** | `import_document` | writes — into `_inbox/` only |
+| | `export_document` | read-only |
 
 Typical loop:
 
@@ -84,6 +86,43 @@ rewrites the text with none — still fully recorded, and the receipt discloses 
 edit touched a revision-capable part, so it is never silently indistinguishable from an
 ordinary save.
 
+## Chat and hosted clients
+
+A file uploaded into a chat lives in the **client's** sandbox, not on the server's filesystem,
+so `open_document` correctly refuses its path. Widening `OOXML_LEDGER_ROOTS` cannot reach it.
+Send the bytes instead:
+
+```
+import_document → open_document → … → commit_document → export_document
+```
+
+```python
+p = import_document(name="report.docx", content_base64="UEsDB…")["path"]  # → <root>/_inbox/report.docx
+sid = open_document(document=p)["session_id"]
+...                                                    # edit as usual
+commit_document(sid)                                   # → receipt schema ooxml-ledger/2
+export_document(document=p)                            # → file + receipt as embedded resources
+```
+
+- **Where it lands.** `import_document` takes a bare filename and writes
+  `_inbox/<name>` under the **first** root. It never overwrites an existing file, and it
+  validates the bytes as a real Office package before anything is published.
+- **Large files.** A model has to emit the base64 itself, so a single call carries far less
+  than the cap. Send chunks: `final=false` returns an `upload_id`; continue with it and
+  `offset` (the bytes received so far); the `final=true` call must carry the `sha256` of the
+  whole file. A lost or repeated chunk is a refusal, never a different document.
+- **Size cap.** `OOXML_LEDGER_IMPORT_MAX_BYTES` sets the largest document either tool
+  accepts, in decoded bytes. The default is 25 MiB.
+- **Provenance.** An imported document's first bytes on this host came from a tool call, not
+  from the user's filesystem. Every receipt in that lineage is therefore sealed as
+  `ooxml-ledger/2`, with a chain-bound `provenance` block (`docs/superpowers/specs/receipt-format-v2.md`).
+  `verify` prints it as a `PROVENANCE` line, and it never changes the verdict. Receipts for
+  every other document stay `ooxml-ledger/1`, byte-identical to before.
+- **Getting it back.** `export_document` returns the file as an MCP embedded resource, with
+  its Office media type and the receipt alongside. By default it refuses a document that no
+  stored receipt matches, so an unsealed edit is never handed out; pass
+  `require_receipt=false` to override.
+
 ## Format matrix
 
 | Format | Verify | Edit |
@@ -97,7 +136,8 @@ engines are format-specific: `wml.py` (Word) and `pml.py` (PowerPoint).
 
 ## Read-only deployment
 
-`OOXML_LEDGER_READ_ONLY=1` leaves exactly `server_info`, `digest`, `verify`, `list_receipts`.
+`OOXML_LEDGER_READ_ONLY=1` leaves exactly `server_info`, `digest`, `verify`, `list_receipts`,
+`export_document`.
 The others aren't merely hidden — calling one answers `Unknown tool`. No write surface inside
 the roots at all.
 
@@ -135,6 +175,13 @@ darwin-specific, but only the darwin launch path has actually been proven end-to
   back to a generic file write, an Office round-trip, a careless collaborator — not someone who
   rewrites the receipt alongside the document. Anchoring its hash somewhere the holder doesn't
   control (a git commit, a DOI, a submission portal) is what buys tamper-evidence.
+- **Imported provenance lives beside `_inbox/`.** The import record sits in the store next to
+  the imported file. Moving that file out of `_inbox/` **before** its first commit drops the
+  record, so the first receipt is written as v1. After a commit, the lineage travels with
+  the receipts store. Provenance records what arrived, not that it matches the user's
+  original upload: compare its `sha256` out of band if that matters.
+- **A v0.3.0 verifier rejects `ooxml-ledger/2`.** This is by design. It cannot check the
+  genesis rule, so refusing is better than silently accepting a chain it does not understand.
 - **`verify` never replays.** It checks the digest and the receipt's internal consistency; the
   replay runs once, at commit, and `verify` reports that verdict rather than recomputing it.
 - **pptx and xlsx have no human-visible record.** Word tracked changes are a second recording

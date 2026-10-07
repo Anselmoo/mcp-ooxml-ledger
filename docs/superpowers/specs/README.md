@@ -21,6 +21,8 @@ produced and silently invalidate every receipt in existence — so it does not g
 - **`../plans/`** — execution plans, from 2026-09-02 on. See "Plans" below for why the
   earlier ones are cited but absent.
 - **`receipt-format-v1.md`** — normative. The receipt JSON schema (`ooxml-ledger/1`).
+- **`receipt-format-v2.md`** — normative. `ooxml-ledger/2`: v1 plus a chain-bound
+  `provenance` block, written only for a document whose lineage began at `import_document`.
 - **`canonicalization-v1.md`** — normative. How a document is reduced to a digest
   (`ooxml-canon/1`).
 

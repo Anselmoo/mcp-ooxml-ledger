@@ -743,3 +743,120 @@ def test_an_out_of_range_index_still_names_both_bounds(tmp_path):
             mode="direct",
             allocator=wml.allocator_for(pkg),
         )
+
+
+def _delete0(pkg, mode="tracked"):
+    return wml.delete_paragraph(
+        pkg,
+        DOC,
+        para_index=0,
+        para_hash=_hash0(pkg),
+        author="Bob",
+        at=AT,
+        mode=mode,
+        allocator=wml.allocator_for(pkg),
+    )
+
+
+def test_deleting_an_already_deleted_paragraph_is_refused(tmp_path):
+    """A paragraph whose mark already carries `w:del` is someone's pending deletion. A
+    second tracked delete would stack a second `w:del` on the mark — schema-invalid — and
+    rejecting either one would no longer restore what the other author saw."""
+    pkg = _synthetic(
+        tmp_path,
+        b'<w:p><w:pPr><w:rPr><w:del w:id="7" w:author="Alice" '
+        b'w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr>'
+        b"<w:r><w:t>gone already</w:t></w:r></w:p>"
+        b"<w:p><w:r><w:t>keep</w:t></w:r></w:p>",
+    )
+    before = pkg.read(DOC)
+    with pytest.raises(EditRefused, match="already marked deleted"):
+        _delete0(pkg)
+    assert pkg.read(DOC) == before
+
+
+def test_a_self_closing_paragraph_rPr_is_expanded_to_carry_the_mark(tmp_path):
+    """`<w:rPr/>` inside `w:pPr` is legal and has no closing tag to insert before. The mark
+    must REPLACE the empty element with an expanded one, not be appended after it (a second
+    `w:rPr`, schema-invalid) and not be dropped (a tracked delete that rejecting cannot
+    undo, because the mark was never recorded)."""
+    pkg = _synthetic(
+        tmp_path,
+        b'<w:p><w:pPr><w:pStyle w:val="Body"/><w:rPr/></w:pPr>'
+        b"<w:r><w:t>x</w:t></w:r></w:p>"
+        b"<w:p><w:r><w:t>keep</w:t></w:r></w:p>",
+    )
+    _delete0(pkg)
+    data = pkg.read(DOC)
+    para = wml.iter_paragraphs(DOC, data)[0]
+    scope = data[para.span.start : para.span.end]
+    assert b"<w:rPr/>" not in scope
+    assert scope.count(b"<w:rPr>") == 1
+    assert b'<w:pPr><w:pStyle w:val="Body"/><w:rPr><w:del ' in scope
+
+
+def test_tracked_delete_retags_a_self_closing_text_element(tmp_path):
+    """`<w:t/>` is an explicitly-empty run some producers emit. Retagging it to
+    `w:delText` must keep it self-closing — searching for its `</w:t>` would either raise or
+    find the NEXT run's closing tag and swallow the bytes between. And rejecting the session's
+    deletion must turn it back into the `<w:t/>` it was. (Rejection leaves the emptied
+    `<w:pPr><w:rPr></w:rPr></w:pPr>` behind, so the round trip is compared on runs and text,
+    not bytes.)"""
+    pkg = _synthetic(
+        tmp_path,
+        b"<w:p><w:r><w:t/></w:r><w:r><w:t>x</w:t></w:r></w:p>"
+        b"<w:p><w:r><w:t>keep</w:t></w:r></w:p>",
+    )
+    before = pkg.read(DOC)
+    alloc = wml.allocator_for(pkg)
+    wml.delete_paragraph(
+        pkg,
+        DOC,
+        para_index=0,
+        para_hash=_hash0(pkg),
+        author="Bob",
+        at=AT,
+        mode="tracked",
+        allocator=alloc,
+    )
+    data = pkg.read(DOC)
+    assert b"<w:delText/>" in data
+    assert b"<w:t/>" not in data
+    assert wml.iter_paragraphs(DOC, data)[0].text == "x"
+
+    rejected, problems = wml.reject_only(data, set(alloc.taken))
+    assert problems == []
+    assert b"<w:r><w:t/></w:r><w:r><w:t>x</w:t></w:r>" in rejected
+    assert b"delText" not in rejected
+    assert [p.text for p in wml.iter_paragraphs(DOC, rejected)] == [
+        p.text for p in wml.iter_paragraphs(DOC, before)
+    ]
+
+
+def test_a_tracked_empty_paragraph_carries_only_its_mark_and_rejects_away(tmp_path):
+    """`text=""` inserts a blank line: the new paragraph has an inserted MARK and no run.
+    Wrapping an absent body in `w:ins` would emit an empty revision a reviewer sees as a
+    change with nothing in it; omitting the mark would make the blank line unrejectable."""
+    pkg = _pkg(tmp_path)
+    before = pkg.read(DOC)
+    alloc = wml.allocator_for(pkg)
+    op = wml.insert_paragraph(
+        pkg,
+        DOC,
+        at_index=1,
+        text="",
+        author="Bob",
+        at=AT,
+        mode="tracked",
+        allocator=alloc,
+    )
+    data = pkg.read(DOC)
+    new = wml.iter_paragraphs(DOC, data)[1]
+    assert new.text == ""
+    assert new.segs == ()
+    assert len(alloc.taken) == 1  # the mark's id only; no second id for an empty body
+    assert op["op"] == "paragraph_insert"
+
+    rejected, problems = wml.reject_only(data, set(alloc.taken))
+    assert problems == []
+    assert rejected == before

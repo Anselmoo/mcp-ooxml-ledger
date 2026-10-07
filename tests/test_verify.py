@@ -483,3 +483,19 @@ def test_an_unreadable_explicit_original_is_named_as_the_supplied_original(tmp_p
     assert t3, v.reasons
     assert "supplied original" in t3[0], t3
     assert "stored baseline" not in t3[0], t3
+
+
+def test_t1_divergence_with_an_identical_manifest_says_the_parts_do_not_explain_it(
+    tmp_path, monkeypatch
+):
+    """The 'should not happen' branch: a whole-package digest that differs while every
+    recorded per-part digest still matches. Forced by recording the real manifest and
+    lying about the whole digest — the verdict must say the parts do not explain it rather
+    than imply they are clean."""
+    doc, receipt = _prepare(tmp_path)
+    receipt = _with_result_parts(receipt, manifest(Package.open(doc, tmp_path / "m0")))
+    raw = receipt.model_dump(mode="json", by_alias=True)
+    raw["result"]["digest"] = "sha256:" + "f" * 64
+    v = verify(doc, receipt=Receipt.model_validate(raw))
+    reason = next(r for r in v.reasons if "T1" in r)
+    assert "do not explain the divergence" in reason

@@ -116,3 +116,25 @@ def test_reordering_two_operations_breaks_the_chain():
     ]
     swapped = [ops[0], ops[2], ops[1]]
     assert first_break(swapped) is not None
+
+
+def test_a_chain_sealed_from_a_genesis_verifies_only_from_that_genesis():
+    """receipt-format-v2 §4: operation 1 chains onto `provenance.hash`, not null."""
+    from ooxml_ledger.ledger.chain import first_break, seal
+    from ooxml_ledger.ledger.models import OPERATION_ADAPTER
+
+    genesis = "sha256:" + "e" * 64
+    raw = {
+        "seq": 1,
+        "op": "text_edit",
+        "author": "A",
+        "at": "2026-08-26T10:00:00Z",
+        "mode": "direct",
+        "target": {"part": "word/document.xml", "para_index": 0},
+        "before": "a",
+        "after": "b",
+    }
+    ops = [OPERATION_ADAPTER.validate_python(o) for o in seal([raw], genesis=genesis)]
+    assert ops[0].prev_hash == genesis
+    assert first_break(ops, genesis=genesis) is None
+    assert first_break(ops) == 1
